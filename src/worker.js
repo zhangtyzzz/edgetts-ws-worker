@@ -59,6 +59,59 @@ var OPENAI_VOICE_MAP = {
   "echo": "zh-CN-liaoning-XiaobeiNeural"
   // 东北女声 -> 晓北
 };
+// ------------------------------------------------------------------ 火山翻译 TTS
+//
+// 与 edge 同属"借官方免费客户端的内部接口"这条路线：这里借的是火山翻译浏览器扩展
+// (klgfhbiooeogdfodpopgppeadghjjemk) 的网页朗读接口，匿名、无 key。与 edge 的差异：
+//   - 只有 mp3 一种输出（上游返回 base64 mp3）
+//   - 不支持语速/音调/停顿标签（上游 body 只有 text/speaker/language）
+//   - 音色固定 10 个，语言先用 langdetect 接口确定
+// 协议实测于 2026-10-16：langdetect 返回 {"language":"zh"}；
+// tts 返回 {audio:{data:<base64 mp3>,duration}, base_resp:{status_code:0}}。
+var VOLC_VOICES = {
+  "zh_female_story":    { label: "少儿故事 · 中英混", language: "zh", gender: "Female" },
+  "zh_female_qingxin":  { label: "清新女声 · 中英混", language: "zh", gender: "Female" },
+  "zh_female_zhubo":    { label: "女主播 · 中英混",   language: "zh", gender: "Female" },
+  "zh_male_zhubo":      { label: "男主播 · 中英混",   language: "zh", gender: "Male" },
+  "zh_male_xiaoming":   { label: "影视男解说 · 中英混", language: "zh", gender: "Male" },
+  "zh_female_sichuan":  { label: "四川女声 · 川英混", language: "zh", gender: "Female" },
+  "zh_male_rap":        { label: "嘻哈男歌手 · 中英混", language: "zh", gender: "Male" },
+  "en_female_sarah":    { label: "澳英女声 · 澳洲英语", language: "en", gender: "Female" },
+  "jp_male_satoshi":    { label: "活力男青年 · 日语", language: "ja", gender: "Male" },
+  "jp_female_hana":     { label: "温柔女声 · 日语",   language: "ja", gender: "Female" }
+};
+var VOLC_DEFAULT_VOICE = "zh_female_qingxin";
+var VOLC_CONCURRENCY = 5;   // 匿名接口，礼貌起见并发低于 edge 的 10
+var VOLC_API = {
+  LANGDETECT: "https://translate.volcengine.com/web/langdetect/v1/",
+  TTS: "https://translate.volcengine.com/crx/tts/v1/",
+  HEADERS: {
+    "Content-Type": "application/json",
+    "Origin": "chrome-extension://klgfhbiooeogdfodpopgppeadghjjemk",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  }
+};
+// 引擎路由：model 显式指定火山（volc / volc-tts / volc-tts-*）优先；
+// 否则 voice 精确命中火山音色名（带下划线，不会与 edge 的 ShortName 格式混淆）。
+// 其余一律 edge，保持存量调用方行为不变。
+function resolveEngine(model, voice) {
+  var m = typeof model === "string" ? model.toLowerCase() : "";
+  if (m === "volc" || m.indexOf("volc-tts") === 0) return "volc";
+  if (typeof voice === "string" && Object.prototype.hasOwnProperty.call(VOLC_VOICES, voice)) return "volc";
+  return "edge";
+}
+// 纯函数：校验并解析火山合成响应。status_code!=0 或 audio.data 缺失都算失败，
+// 把上游错误码带出来，调用方映射成 errorResponse。
+function parseVolcResponse(json) {
+  if (!json || typeof json !== "object") return { ok: false, errCode: "unparseable", errMsg: "响应不是 JSON" };
+  var base = json.base_resp || {};
+  if (base.status_code !== 0 && base.status_code !== undefined) {
+    return { ok: false, errCode: String(base.status_code), errMsg: base.status_message || "上游拒绝" };
+  }
+  var data = json.audio && json.audio.data;
+  if (typeof data !== "string" || !data) return { ok: false, errCode: "no_audio", errMsg: "上游未返回音频" };
+  return { ok: true, data: data };
+}
 // ------------------------------------------------------------------ 结构化日志
 //
 // 为什么需要：审计发现 18 个日志点里 17 个只在**异常路径**，唯一那条正常路径日志记的是
@@ -367,6 +420,12 @@ async function handleSpeechRequest(request, logCtx = null) {
     return errorResponse("文本清理后为空，请检查 cleaning_options", 400, "input_empty_after_cleaning");
   }
 
+  // ---- 引擎路由：火山翻译（免 key 匿名通道）----
+  // 放在 edge 的 voice 解析之前：火山音色名带下划线，通不过下面的 VOICE_RE。
+  if (resolveEngine(model, requestBody.voice) === "volc") {
+    return await handleVolcSpeech(cleanedInput, requestBody, logCtx);
+  }
+
   // Resolve the voice with explicit intent winning over inference:
   //   1. `voice` that is already a real Microsoft name  -> use as-is
   //   2. `voice` that is an OpenAI alias ("shimmer", …) -> map it
@@ -557,7 +616,13 @@ async function handleSpeechRequest(request, logCtx = null) {
   // 数组里塞新元素 —— 那会把 label 挤到后面一位。logCtx 作为独立参数单独传。
   const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
   if (stream) {
-    return await streamVoice(textChunks, safeConcurrency, logCtx, ...ttsArgs);
+    return await streamVoice(
+      textChunks,
+      safeConcurrency,
+      (t, label) => getAudioChunk(t, ...ttsArgs, label, logCtx),
+      contentType,
+      logCtx
+    );
   } else {
     return await getVoice(textChunks, safeConcurrency, logCtx, ...ttsArgs);
   }
@@ -616,6 +681,23 @@ function toModel(voice) {
   };
 }
 
+// 火山音色进入 /v1/models 用 owned_by 区分引擎（UI 据此分流）。
+// created 沿用同一个锚点，保证列表仍近乎静态、ETag 稳定。
+function toVolcModel(id, v) {
+  return {
+    id,
+    object: "model",
+    created: MODELS_CREATED_AT,
+    owned_by: "volcengine",
+    language: v.language,
+    gender: v.gender,
+    description: v.label
+  };
+}
+function volcModels() {
+  return Object.keys(VOLC_VOICES).map((id) => toVolcModel(id, VOLC_VOICES[id]));
+}
+
 async function getModels() {
   const fresh = voicesCache.models && Date.now() - voicesCache.fetchedAt < VOICES_TTL_MS;
   if (fresh) return voicesCache.models;
@@ -626,7 +708,8 @@ async function getModels() {
       const response = await fetch(VOICES_URL);
       if (!response.ok) throw new Error("Failed to fetch voices from EdgeTTS");
       const voices = await response.json();
-      const models = voices.map(toModel);
+      // edge(微软) + 火山 两个引擎的声音合并进同一个列表；owned_by 区分
+      const models = voices.map(toModel).concat(volcModels());
       voicesCache = { models, fetchedAt: Date.now() };
       return models;
     })().finally(() => { voicesInFlight = null; });
@@ -703,9 +786,10 @@ function notModified(request, etag) {
  * 按查询参数过滤语音列表。两个端点共用，因为 README 承诺的过滤能力不该只在
  * 需要鉴权的那一个上生效 —— 内置 UI 的音色筛选走的正是公开端点。
  *
- * 注意 ?neural：上游 322 个音色**全部**含 "Neural"，所以这个参数恒为 no-op。
- * 保留它是为了向后兼容既有调用方（去掉会让 ?neural=true 的请求行为改变），
- * 但文档里已标注它没有实际作用，不要在此基础上做新设计。
+ * 注意 ?neural：edge 的 322 个音色全部含 "Neural"，本参数对它们恒为 no-op；
+ * 并入火山引擎后语义微调——火山 id 不含 "Neural"，?neural=true 等价于"只看 edge"，
+ * 老调用方拿到的仍是原来那 322 个，无行为回退。保留参数是为了兼容既有调用方
+ * （去掉会让 ?neural=true 的请求行为改变），不要在此基础上做新设计。
  */
 function filterModels(models, url) {
   const on = (v) => v === "true" || v === "1";
@@ -756,15 +840,19 @@ async function handleModelsRequest(request) {
       { id: "zh-CN-XiaoxiaoNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Female", description: "晓晓 - 温柔女声" },
       { id: "zh-CN-YunxiNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Male", description: "云希 - 阳光男声" }
     ];
+    // 火山音色是本地静态表，不依赖上游，降级时也完整可用
+    fallbackModels.push(...volcModels());
     // 兜底列表不缓存：它是降级产物，不该被边缘/浏览器当成 6 小时有效的正常结果
     return new Response(JSON.stringify(fallbackModels), {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...makeCORSHeaders() }
     });
   }
 }
-async function streamVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
+// 通用流式响应：fetchChunk(text, label) -> Blob。edge 与火山共用同一条
+// 滑动窗口管线，contentType 决定响应头（edge 流式是 pcm，火山是 mp3——
+// mp3 帧自同步，客户端可边收边播；wav/webm 这类带头容器不能走这条路）。
+async function streamVoice(textChunks, concurrency, fetchChunk, contentType, logCtx) {
   const { readable, writable } = new TransformStream();
-  const contentType = ttsArgs[5] || "audio/mpeg";
   // 流式的响应头在第一个分块之前就发出，所以 handleRequest 里那次 emitLog 会在合成**还没
   // 开始**时就跑 —— 实测记出 `ms:6, upstream:0`，而这个请求实际打了 4 次上游、耗时 192ms。
   // 那种数据比没有更糟：它会把每个流式请求的 p99 和上游用量都算低。
@@ -772,7 +860,7 @@ async function streamVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
   // 所以流式自己负责在流真正结束（或失败）时再记一次，并让 handleRequest 那次跳过
   // （streamLogged 标记）。这也是 `ms` 对两条路径含义不同的地方，已在字段名注释里说明。
   if (logCtx) logCtx.streamLogged = true;
-  pipeChunksToStream(writable.getWriter(), textChunks, concurrency, logCtx, ...ttsArgs)
+  pipeChunksToStream(writable.getWriter(), textChunks, concurrency, fetchChunk, logCtx)
     .then(() => {
       // 流式无法在发头之后改状态码，所以「上游给了 0 字节」这件事在流式路径上**只能**靠
       // 日志暴露（非流式已改为 502 upstream_empty_audio）。单独标记出来，这样
@@ -790,7 +878,7 @@ async function streamVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
     headers: { "Content-Type": contentType, ...makeCORSHeaders() }
   });
 }
-async function pipeChunksToStream(writer, chunks, concurrency, logCtx, ...ttsArgs) {
+async function pipeChunksToStream(writer, chunks, concurrency, fetchChunk, logCtx) {
   // Sliding-window prefetch: keep `concurrency` synthesis requests in flight while
   // writing results strictly in order. The previous implementation awaited each chunk
   // sequentially, so the `concurrency` argument had no effect and long inputs were
@@ -800,7 +888,7 @@ async function pipeChunksToStream(writer, chunks, concurrency, logCtx, ...ttsArg
 
   const schedule = (index) => {
     if (index >= chunks.length) return;
-    const task = getAudioChunk(chunks[index], ...ttsArgs, `#${index + 1}/${chunks.length}`, logCtx)
+    const task = fetchChunk(chunks[index], `#${index + 1}/${chunks.length}`)
       .then((blob) => blob.arrayBuffer());
     // 必须在这里就挂上 handler，不能等主循环结束后补。unhandledRejection 的判定是
     // 时序性的：V8 在 microtask 队列排空的那一刻检查「此刻有没有 handler」，事后
@@ -1133,7 +1221,7 @@ async function concatWavBlobs(blobs, contentType, logCtx = null) {
  * 下标，顺手就成了工作池。非流式靠 Promise.all 白拿顺序，分批写法看着对，就没人发现
  * 它在白扔延迟。这里补齐，两条路径的调度语义从此一致。
  */
-async function synthesizeAllChunks(textChunks, concurrency, ttsArgs, logCtx) {
+async function synthesizeAllChunks(textChunks, concurrency, fetchChunk, logCtx) {
   const out = new Array(textChunks.length);
   const width = Math.max(1, Math.min(concurrency, textChunks.length));
   let next = 0;
@@ -1148,7 +1236,7 @@ async function synthesizeAllChunks(textChunks, concurrency, ttsArgs, logCtx) {
       const i = next++;
       if (i >= textChunks.length) return;
       try {
-        out[i] = await getAudioChunk(textChunks[i], ...ttsArgs, `#${i + 1}/${textChunks.length}`, logCtx);
+        out[i] = await fetchChunk(textChunks[i], `#${i + 1}/${textChunks.length}`);
       } catch (error) {
         failed = true; // 先置位再抛，让同伴 worker 在下一轮循环即退出
         throw error;
@@ -1163,7 +1251,7 @@ async function synthesizeAllChunks(textChunks, concurrency, ttsArgs, logCtx) {
 async function getVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
   const contentType = ttsArgs[5] || "audio/mpeg";
   try {
-    const allAudioBlobs = await synthesizeAllChunks(textChunks, concurrency, ttsArgs, logCtx);
+    const allAudioBlobs = await synthesizeAllChunks(textChunks, concurrency, (t, label) => getAudioChunk(t, ...ttsArgs, label, logCtx), logCtx);
     // WAV 是带头部的容器：裸拼接 N 个分块等于把 N 个完整 RIFF 文件首尾相接，
     // 播放器读到第一个头里的 data 长度就停了，后面全部音频被静默丢弃。默认
     // chunk_size=300，所以约 300 字符以上的输入就会触发——用户听到的是被截断的
@@ -1219,6 +1307,147 @@ async function getVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
       );
     }
     return errorResponse("语音合成失败，请稍后重试", 500, "tts_generation_error");
+  }
+}
+// ------------------------------------------------------------------ 火山翻译 TTS 合成
+//
+// 复用 edge 的分块并发管线（smartChunkText + synthesizeAllChunks/streamVoice + mp3 裸拼接）。
+// 与 edge 的差异点：
+//   - 语速/音调/音量参数接受但不透传（上游不支持）
+//   - <break> 标签替换为逗号（火山不认 SSML，原样发会被当正文念出来）
+//   - langdetect 只调一次（整段文本定语言），分块共用同一个 language
+//   - stream 走 Worker 层分块流式（上游无真流式），mp3 渐进下发
+async function handleVolcSpeech(cleanedInput, requestBody, logCtx) {
+  const voice = requestBody.voice;
+  if (typeof voice !== "string" || !Object.prototype.hasOwnProperty.call(VOLC_VOICES, voice)) {
+    return errorResponse(
+      `无效的火山音色：${JSON.stringify(voice)}。可选 ${Object.keys(VOLC_VOICES).join(" | ")}`,
+      400,
+      "invalid_voice"
+    );
+  }
+  // 未传 response_format 时按 OpenAI 语义默认 mp3（主路径的默认值在解构里，
+  // 这里拿到的是原始 body，需要自己兜底 —— 否则省略该字段的调用会被误拒）
+  const volcFormat = requestBody.response_format ?? "mp3";
+  if (volcFormat !== "mp3") {
+    return errorResponse(
+      `火山引擎仅支持 mp3 输出，收到 ${JSON.stringify(volcFormat)}`,
+      400,
+      "invalid_response_format"
+    );
+  }
+  const safeChunkSize = clamp(requestBody.chunk_size, LIMITS.MIN_CHUNK_SIZE, LIMITS.MAX_CHUNK_SIZE, DEFAULT_CHUNK_SIZE);
+  // <break time="1s"/> -> "，"：保留停顿语义的近似，避免标签被朗读
+  const volcText = cleanedInput.replace(/<break(?:\s[^>]*)?\/>/gi, "，");
+  const minChunks = Math.ceil(volcText.length / safeChunkSize);
+  if (minChunks > LIMITS.MAX_CHUNKS) {
+    return errorResponse(
+      `文本过长：火山引擎按 chunk_size=${safeChunkSize} 至少切 ${minChunks} 块，超过上限 ${LIMITS.MAX_CHUNKS}。请调大 chunk_size 或拆分文本。`,
+      413,
+      "too_many_chunks"
+    );
+  }
+  const textChunks = smartChunkText(volcText, safeChunkSize);
+  if (textChunks.length === 0 || textChunks.length > LIMITS.MAX_CHUNKS) {
+    return errorResponse("文本分块结果为空或过多", 413, "too_many_chunks");
+  }
+  const safeConcurrency = clamp(requestBody.concurrency, LIMITS.MIN_CONCURRENCY, LIMITS.MAX_CONCURRENCY, VOLC_CONCURRENCY);
+  if (logCtx) {
+    logCtx.voice = voice;
+    logCtx.format = "mp3";
+    logCtx.chunks = textChunks.length;
+    logCtx.concurrency = safeConcurrency;
+    logCtx.stream = requestBody.stream === true;
+    logCtx.inputChars = volcText.length;
+  }
+  try {
+    // 整段文本测一次语言即可；langdetect 也算一个上游子请求
+    if (logCtx) logCtx.upstreamCalls++;
+    const language = await volcDetectLanguage(volcText);
+    const fetchChunk = (t, label) => getVolcAudioChunk(t, voice, language, label, logCtx);
+    // 火山上游本身是"整段一次性返回"（一个 JSON 里的完整 base64），没有真正的
+    // 上游流式；这里的 stream 是 **Worker 层分块流式** —— 首块合成完立刻下发，
+    // 多块文本的 TTFB 从「全部块完成」降到「首块完成」。mp3 帧自同步，
+    // 客户端可以边收边播（wav/webm 容器没有这个性质，所以那条限制不适用反向）。
+    if (requestBody.stream === true) {
+      return await streamVoice(textChunks, safeConcurrency, fetchChunk, "audio/mpeg", logCtx);
+    }
+    const blobs = await synthesizeAllChunks(textChunks, safeConcurrency, fetchChunk, logCtx);
+    // mp3 帧自同步，裸拼接安全（edge 的多分块 mp3 走的就是同一条路）
+    const audioBody = new Blob(blobs, { type: "audio/mpeg" });
+    if (logCtx) logCtx.bytes = audioBody.size;
+    if (audioBody.size === 0) {
+      return errorResponse("火山上游返回了空音频（0 字节）", 502, "upstream_empty_audio");
+    }
+    return new Response(audioBody, {
+      headers: { "Content-Type": "audio/mpeg", ...makeCORSHeaders() }
+    });
+  } catch (error) {
+    console.error("火山 TTS 失败:", error);
+    // 业务错误（base_resp.status_code!=0）是确定性的调用方问题 —— 音色不存在、参数
+    // 非法等，映射 400 让调用方去改参数，而不是误报服务端 500。
+    if (error?.volcCode) {
+      return errorResponse(
+        `火山上游拒绝了请求（火山错误码 ${error.volcCode}）：${error.message}`,
+        400,
+        "upstream_rejected_request"
+      );
+    }
+    if (error?.status >= 400 && error.status < 500) {
+      return errorResponse(`火山上游拒绝了请求（HTTP ${error.status}）：${error.message}`, 400, "upstream_rejected_request");
+    }
+    return errorResponse(`火山语音合成失败，请稍后重试`, 500, "tts_generation_error");
+  }
+}
+async function volcDetectLanguage(text) {
+  const resp = await fetch(VOLC_API.LANGDETECT, {
+    method: "POST",
+    headers: VOLC_API.HEADERS,
+    body: JSON.stringify({ text })
+  });
+  if (!resp.ok) {
+    const err = new Error(`langdetect HTTP ${resp.status}`);
+    err.status = resp.status;
+    throw err;
+  }
+  const json = await resp.json();
+  const lang = json && json.language;
+  if (typeof lang !== "string" || !lang) {
+    const err = new Error("langdetect 未返回语言");
+    throw err;
+  }
+  return lang;
+}
+async function getVolcAudioChunk(text, speaker, language, label = "", logCtx = null) {
+  // 上游偶发抖动时重试一次；连续两次失败才算这块失败
+  for (var attempt = 1; attempt <= 2; attempt++) {
+    if (logCtx) logCtx.upstreamCalls++;
+    try {
+      const resp = await fetch(VOLC_API.TTS, {
+        method: "POST",
+        headers: VOLC_API.HEADERS,
+        body: JSON.stringify({ text, speaker, language })
+      });
+      if (!resp.ok) {
+        const err = new Error(`火山合成 HTTP ${resp.status}`);
+        err.status = resp.status;
+        throw err;
+      }
+      const parsed = parseVolcResponse(await resp.json());
+      if (!parsed.ok) {
+        const err = new Error(parsed.errMsg);
+        err.volcCode = parsed.errCode;
+        err.noRetry = true;   // 业务错误是确定性的（音色/参数问题），重试只会再失败一次
+        throw err;
+      }
+      const bytes = await base64ToBytes(parsed.data);
+      return new Blob([bytes], { type: "audio/mpeg" });
+    } catch (error) {
+      if (error?.noRetry || attempt === 2) throw error;
+      if (logCtx) logCtx.retries++;
+      console.warn(`火山分块${label}第 ${attempt} 次失败（${error.volcCode || error.status || "network"}），重试`);
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
 }
 var MAX_CHUNK_ATTEMPTS = 3;
@@ -1686,6 +1915,10 @@ export const __test__ = {
   parseWebmChunk,
   smartChunkText,
   cleanText,
+  resolveEngine,
+  parseVolcResponse,
+  VOLC_VOICES,
+  VOLC_DEFAULT_VOICE,
   // Reset the module-level token cache so tests are order-independent.
   resetTokenCache() {
     tokenInfo = { endpoint: null, token: null, expiredAt: null };

@@ -22,19 +22,22 @@ const CLOSE_SCRIPT = '</scr' + 'ipt>'; // avoid a literal closing tag in this fi
 // ---------------------------------------------------------------------------
 // BUG 1: streaming used to keep the container format (mp3/opus), so <audio>
 // decoded the first chunk as a complete short file and fired 'ended' immediately.
-// Fix: the UI rewrites response_format to 'pcm' for every streaming request.
+// Fix: the UI rewrites response_format to 'pcm' for every **edge** streaming
+// request. The volc engine is the documented exception: its stream is mp3
+// chunks played progressively via MSE (mp3 frames self-synchronize), so the
+// pcm rewrite must NOT fire for it.
 // ---------------------------------------------------------------------------
-test('BUG#1 streaming must force PCM: UI rewrites response_format to pcm before streaming', () => {
+test('BUG#1 streaming must force PCM (edge only): UI rewrites response_format to pcm before streaming', () => {
   assert.match(
     UI,
     /requestBody\.response_format\s*=\s*'pcm'/,
     'ui/index.html must assign requestBody.response_format = \'pcm\' for streaming'
   );
-  // The rewrite has to be guarded by isStream, not by format alone.
+  // The rewrite has to be guarded by isStream + engine, not by format alone.
   assert.match(
     UI,
-    /if\s*\(\s*isStream\s*&&\s*requestBody\.response_format\s*!==\s*'pcm'\s*\)/,
-    'the pcm rewrite must be conditioned on isStream'
+    /if\s*\(\s*isStream\s*&&\s*this\.form\.engine\s*===\s*'edge'\s*&&\s*requestBody\.response_format\s*!==\s*'pcm'\s*\)/,
+    'the pcm rewrite must be conditioned on isStream AND engine === edge'
   );
 });
 
@@ -278,7 +281,8 @@ test('BUG#5b the four supported formats still work end to end', async () => {
 // ---------------------------------------------------------------------------
 test('BUG#6 headerless PCM is unplayable in <audio>: UI dropdown offers no pcm option', () => {
   assert.equal(UI.includes('<option value="pcm"'), false, 'no pcm entry in the format dropdown');
-  const options = [...UI.matchAll(/<option value="([a-z0-9]+)">/g)].map((m) => m[1]);
+  // 选项上可能带 Vue 绑定属性（如火山引擎下的 :disabled），正则需容忍 value 后的属性
+  const options = [...UI.matchAll(/<option value="([a-z0-9]+)"[^>]*>/g)].map((m) => m[1]);
   assert.deepEqual(options, ['mp3', 'opus', 'wav'], 'dropdown offers exactly mp3/opus/wav');
   // pcm must remain a legal server-side format — it is what streaming uses.
   assert.match(UI, /pcm:\s*'audio\/pcm'/, 'UI still knows the pcm MIME type for streaming');

@@ -379,6 +379,33 @@
     /* ============ 音色卡（右列，可伸缩，列表内滚） ============ */
     .voice-card { flex: 1; min-height: 280px; display: flex; flex-direction: column; gap: 10px; }
 
+    /* 引擎切换：sub-nav-pill 风格，激活态反色 */
+    .engine-tabs { display: flex; gap: 6px; }
+    .engine-tab {
+      flex: 1;
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border-radius: 9999px;
+      border: 1px solid var(--hairline);
+      background: var(--card);
+      font-family: var(--font-body);
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--charcoal);
+      cursor: pointer;
+      transition: border-color 0.15s, background-color 0.15s, color 0.15s;
+    }
+    .engine-tab:hover { border-color: var(--hairline-strong); }
+    .engine-tab.active { background: var(--ink); border-color: var(--ink); color: var(--canvas); }
+    [data-theme="dark"] .engine-tab.active { background: var(--card); color: var(--ink); border-color: var(--hairline-strong); }
+    .engine-tab .cnt { font-family: var(--font-mono); font-size: 10.5px; opacity: 0.75; }
+    /* 火山引擎不支持的控件灰显而非隐藏，布局保持稳定 */
+    .is-disabled { opacity: 0.5; }
+    .is-disabled input, .is-disabled select { pointer-events: none; }
+
     .voice-current {
       display: flex;
       align-items: center;
@@ -782,9 +809,21 @@
           <div class="card-head">
             <span class="card-title">音色</span>
             <span class="mono" style="font-size: 11.5px; color: var(--mute);" v-cloak>
-              {{ filteredVoices.length }} / {{ availableVoices.length }}
+              {{ filteredVoices.length }} / {{ engineVoices.length }}
               <button v-if="voiceFilterActive" class="link-btn" @click="resetVoiceFilter">重置</button>
             </span>
+          </div>
+
+          <!-- 引擎切换：Edge 直连（默认）/ 火山翻译（免 key 匿名） -->
+          <div class="engine-tabs" role="tablist" aria-label="TTS 引擎" v-cloak>
+            <button type="button" role="tab" class="engine-tab" :class="{ active: form.engine === 'edge' }"
+                    :aria-selected="form.engine === 'edge' ? 'true' : 'false'" @click="switchEngine('edge')">
+              Edge TTS <span class="cnt">{{ edgeVoiceCount }}</span>
+            </button>
+            <button type="button" role="tab" class="engine-tab" :class="{ active: form.engine === 'volc' }"
+                    :aria-selected="form.engine === 'volc' ? 'true' : 'false'" @click="switchEngine('volc')">
+              火山翻译 <span class="cnt">{{ volcVoiceCount }}</span>
+            </button>
           </div>
 
           <!-- 当前选中：始终可见，含完整 ShortName 供复制 -->
@@ -810,7 +849,7 @@
                 <option value="">全部语言</option>
                 <option v-for="o in langOptions" :key="o.name" :value="o.name">{{ o.name }} ({{ o.count }})</option>
               </select>
-              <select v-model="voiceFilter.region" aria-label="按地区筛选音色">
+              <select v-if="form.engine === 'edge'" v-model="voiceFilter.region" aria-label="按地区筛选音色">
                 <option value="">全部地区</option>
                 <option v-for="o in regionOptions" :key="o.locale" :value="o.locale">
                   {{ o.flag }} {{ o.locale }} ({{ o.count }})
@@ -821,7 +860,7 @@
                 <option value="Female">♀ 女声</option>
                 <option value="Male">♂ 男声</option>
               </select>
-              <label class="vf-check" title="多语言音色可跨语种朗读，中英混排不出戏">
+              <label v-if="form.engine === 'edge'" class="vf-check" title="多语言音色可跨语种朗读，中英混排不出戏">
                 <input type="checkbox" v-model="voiceFilter.multilingualOnly" />
                 <span title="多语言音色能朗读任意书写系统的文本。普通音色遇到自己覆盖不到的文字会返回空音频（服务端已拦为 502）—— 实测 9 种书写系统交叉矩阵里，62/90 组合是空的，而多语言音色 9/9 全部有输出。">仅多语言</span>
               </label>
@@ -861,29 +900,30 @@
 
         <div class="card params-card">
           <div class="params-grid">
-            <div class="form-group">
+            <div class="form-group" :class="{ 'is-disabled': form.engine === 'volc' }" :title="form.engine === 'volc' ? '火山引擎暂不支持语速调节' : ''">
               <div class="slider-label-row">
                 <label for="speed-range">语速</label>
                 <output class="slider-value" for="speed-range" v-cloak>{{ speedDisplay }}</output>
               </div>
-              <input id="speed-range" type="range" v-model.number="form.speed" @input="saveForm" min="0.25" max="2.0" step="0.05" />
+              <input id="speed-range" type="range" v-model.number="form.speed" @input="saveForm" min="0.25" max="2.0" step="0.05" :disabled="form.engine === 'volc'" />
             </div>
-            <div class="form-group">
+            <div class="form-group" :class="{ 'is-disabled': form.engine === 'volc' }" :title="form.engine === 'volc' ? '火山引擎暂不支持音调调节' : ''">
               <div class="slider-label-row">
                 <label for="pitch-range">音调</label>
                 <output class="slider-value" for="pitch-range" v-cloak>{{ pitchDisplay }}</output>
               </div>
-              <input id="pitch-range" type="range" v-model.number="form.pitch" @input="saveForm" min="0.5" max="1.5" step="0.05" />
+              <input id="pitch-range" type="range" v-model.number="form.pitch" @input="saveForm" min="0.5" max="1.5" step="0.05" :disabled="form.engine === 'volc'" />
             </div>
           </div>
           <div class="form-group">
             <label for="response-format">输出格式</label>
             <select id="response-format" v-model="form.responseFormat" @change="saveForm">
               <option value="mp3">MP3 · 兼容性好</option>
-              <option value="opus">Opus · 高压缩</option>
-              <option value="wav">WAV · 无损，体积大</option>
+              <option value="opus" :disabled="form.engine === 'volc'">Opus · 高压缩</option>
+              <option value="wav" :disabled="form.engine === 'volc'">WAV · 无损，体积大</option>
             </select>
-            <small class="hint">仅用于「生成语音」与下载；「流式播放」始终使用 PCM 实时解码。</small>
+            <small class="hint" v-if="form.engine === 'volc'">火山引擎仅支持 MP3；「流式播放」以 MP3 分块渐进下发。暂不支持语速/音调与停顿标签。</small>
+            <small class="hint" v-else>仅用于「生成语音」与下载；「流式播放」始终使用 PCM 实时解码。</small>
           </div>
           <details class="clean-details">
             <summary>高级文本清理</summary>
@@ -974,6 +1014,7 @@
           },
           form: {
             inputText: '输入文本，选择音色，点击「生成语音」即可试听。322 个音色在右侧筛选，支持中英日韩等四十多种语言。',
+            engine: 'edge',   // 'edge' | 'volc' —— 决定 model 与可用音色集
             voice: 'zh-CN-XiaoxiaoNeural',
             speed: 1.0,
             pitch: 1.0,
@@ -1005,12 +1046,23 @@
           return this.form.pitch.toFixed(2);
         },
 
+        // 当前引擎下的音色集：所有筛选统计都基于它
+        engineVoices() {
+          return this.availableVoices.filter(v => v.engine === this.form.engine);
+        },
+        edgeVoiceCount() {
+          return this.availableVoices.filter(v => v.engine === 'edge').length;
+        },
+        volcVoiceCount() {
+          return this.availableVoices.filter(v => v.engine === 'volc').length;
+        },
+
         // ---- 音色筛选（逐层收窄，每层都基于「上一层已筛过」的集合统计数量）----
 
         // 语言下拉的选项：[{name:'英语', count:62}]，按数量降序
         langOptions() {
           const m = new Map();
-          for (const v of this.availableVoices) {
+          for (const v of this.engineVoices) {
             const k = v.langName || v.language;
             m.set(k, (m.get(k) || 0) + 1);
           }
@@ -1022,7 +1074,7 @@
         // 地区下拉：只列出当前语言下的 locale，避免出现选了必空的组合
         regionOptions() {
           const m = new Map();
-          for (const v of this.availableVoices) {
+          for (const v of this.engineVoices) {
             if (this.voiceFilter.lang && (v.langName || v.language) !== this.voiceFilter.lang) continue;
             if (!m.has(v.language)) m.set(v.language, { locale: v.language, flag: v.flag, count: 0 });
             m.get(v.language).count++;
@@ -1034,7 +1086,7 @@
         filteredVoices() {
           const f = this.voiceFilter;
           const q = f.q.trim().toLowerCase();
-          return this.availableVoices
+          return this.engineVoices
             .filter((v) => {
               if (f.multilingualOnly && !v.isMultilingual) return false;
               if (f.gender && v.gender !== f.gender) return false;
@@ -1074,6 +1126,23 @@
             
             const voices = await response.json();
             this.availableVoices = voices.map(v => {
+              // 火山引擎的音色：id 形如 zh_female_sichuan（无连字符），直接按静态表构造
+              if (v.owned_by === 'volcengine') {
+                const LN = { zh: ['🇨🇳', '中文'], en: ['🇬🇧', '英语'], ja: ['🇯🇵', '日语'] };
+                const i = LN[v.language] || ['🌐', v.language];
+                return {
+                  id: v.id,
+                  name: (v.description || v.id).split(' ')[0],   // "四川女声 · 川英混" -> "四川女声"
+                  gender: v.gender,
+                  genderIcon: v.gender === 'Female' ? '♀' : '♂',
+                  language: v.language,
+                  langName: i[1],
+                  flag: i[0],
+                  langDisplay: i[0] + ' ' + (v.description || ''),
+                  isMultilingual: false,
+                  engine: 'volc'
+                };
+              }
               const parts = v.id.split('-');
               const langCode = parts[0] + '-' + parts[1]; // 例如: zh-CN, en-US
               // Multilingual voices can read text in other languages without breaking
@@ -1098,7 +1167,8 @@
                 langName: i.n,         // 语言中文名，如 英语
                 flag: i.f,             // 国旗
                 langDisplay: langDisplay,
-                isMultilingual: isMultilingual
+                isMultilingual: isMultilingual,
+                engine: 'edge'
               };
             });
           } catch (e) {
@@ -1165,6 +1235,8 @@
           takeIf('inputText', 'string');
           takeIf('voice', 'string');
           takeIf('responseFormat', 'string');
+          takeIf('engine', 'string');
+          if (out.engine !== 'volc') out.engine = 'edge';
           // 数字还要挡住 NaN/Infinity —— 它们 typeof 也是 'number'，但会让 <input> 变空。
           for (const key of ['speed', 'pitch']) {
             if (typeof saved[key] === 'number' && Number.isFinite(saved[key])) out[key] = saved[key];
@@ -1235,8 +1307,7 @@
         // 键盘操作音色列表。此前条目是纯 <div> + @click，实测 0/4 可聚焦 —— 键盘和读屏
         // 用户完全选不了音色。用 role=radio + roving tabindex（只有选中项 tabindex=0）,
         // 这是 WAI-ARIA 对 radiogroup 的标准做法:Tab 进出整组，方向键在组内移动。
-        onVoiceKey(ev, id) {
-          const keys = ['Enter', ' ', 'ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'];
+        onVoiceKey(ev, id) {          const keys = ['Enter', ' ', 'ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'];
           if (!keys.includes(ev.key)) return;
           ev.preventDefault();      // 空格会滚动页面、方向键会滚列表，都得挡住
           if (ev.key === 'Enter' || ev.key === ' ') {
@@ -1263,6 +1334,24 @@
 
         selectVoice(id) {
           this.form.voice = id;
+          this.saveForm();
+        },
+        // 切换 TTS 引擎：换音色集、换默认音色，并把火山不支持的参数复位。
+        // 地区筛选与「仅多语言」是 edge 专属维度，切走时清掉以免留下必空组合。
+        switchEngine(e) {
+          if (this.form.engine === e) return;
+          this.form.engine = e;
+          const list = this.engineVoices;
+          if (!list.some(v => v.id === this.form.voice)) {
+            this.form.voice = e === 'volc' ? 'zh_female_qingxin' : 'zh-CN-XiaoxiaoNeural';
+          }
+          this.voiceFilter.region = '';
+          this.voiceFilter.multilingualOnly = false;
+          if (e === 'volc') {
+            this.form.responseFormat = 'mp3';
+            this.form.speed = 1.0;
+            this.form.pitch = 1.0;
+          }
           this.saveForm();
         },
         // 语言变更时清掉地区，避免留下「语言=英语 + 地区=zh-CN」这种必然空集的组合
@@ -1371,10 +1460,10 @@
         },
         getRequestBody() {
           const body = {
+            // model 即引擎路由：edge 系保持 tts-1，火山走 volc-tts
+            model: this.form.engine === 'volc' ? 'volc-tts' : 'tts-1',
             voice: this.form.voice,
             input: this.form.inputText.trim(),
-            speed: this.form.speed,
-            pitch: this.form.pitch,
             response_format: this.form.responseFormat,
             cleaning_options: {
               remove_markdown: this.form.cleaning.removeMarkdown,
@@ -1385,6 +1474,11 @@
               custom_keywords: this.form.cleaning.customKeywords,
             },
           };
+          // 语速/音调仅 edge 支持；火山的上游接口没有这两个参数
+          if (this.form.engine === 'edge') {
+            body.speed = this.form.speed;
+            body.pitch = this.form.pitch;
+          }
           return body;
         },
         async generateSpeech(isStream) {
@@ -1400,12 +1494,9 @@
 
           const requestBody = this.getRequestBody();
           requestBody.stream = isStream;
-
-          // Streaming forces PCM. Container formats (mp3/opus) cannot be played
-          // back incrementally from a Blob — a partial Blob decodes as a short complete
-          // file, so <audio> fires 'ended' after the first chunk instead of continuing.
-          // Raw PCM has no container, so every chunk is independently schedulable.
-          if (isStream && requestBody.response_format !== 'pcm') {
+          // 流式强制 PCM 只适用于 edge（容器格式不能增量解码）。
+          // 火山的流式是 MP3 分块渐进下发，mp3 帧自同步、可边收边播，保持 mp3 不动。
+          if (isStream && this.form.engine === 'edge' && requestBody.response_format !== 'pcm') {
             this.streamFormatNotice = requestBody.response_format;
             requestBody.response_format = 'pcm';
           } else {
@@ -1479,7 +1570,18 @@
           if (body.response_format === 'pcm') {
             return this.playStreamPCM(baseUrl, apiKey, body);
           }
-          
+
+          // MP3（火山引擎流式）：mp3 帧自同步，可用 MSE 边收边播；
+          // 浏览器不支持 MSE audio/mpeg 时退回下面的整段收集路径。
+          if (
+            body.response_format === 'mp3' &&
+            window.MediaSource &&
+            MediaSource.isTypeSupported &&
+            MediaSource.isTypeSupported('audio/mpeg')
+          ) {
+            return this.playStreamMp3(baseUrl, apiKey, body);
+          }
+
           // 其他格式使用原有方式
           const audioChunks = [];
           const startTime = Date.now();
@@ -1754,6 +1856,95 @@
           }
         },
         
+        // MP3 分块流式（火山引擎）：MediaSource 边收边播。
+        // 与 PCM 路径的差异：PCM 走 Web Audio 时间轴逐块调度；MP3 帧自同步，
+        // 直接按到达顺序 append 进 SourceBuffer 即可，浏览器自己处理渐进解码。
+        // 分块同时留一份用于下载（mp3 裸拼接安全，无需转容器）。
+        async playStreamMp3(baseUrl, apiKey, body) {
+          const self = this;
+          const startTime = Date.now();
+          self.streamStats = { elapsed: '0.00', size: 0, ttfb: 0, playStart: 0, show: true };
+          self.stopAllPlayback();
+          self.isPlaying = true;
+          const chunks = [];
+
+          const ms = new window.MediaSource();
+          const objUrl = URL.createObjectURL(ms);
+          self.audioSrc = objUrl;
+
+          // 等待 <audio> 挂上 objectURL 后触发的 sourceopen（addSourceBuffer 必须在 open 之后）
+          await new Promise((resolve) => ms.addEventListener('sourceopen', resolve, { once: true }));
+          const sb = ms.addSourceBuffer('audio/mpeg');
+          sb.mode = 'sequence';
+          // appendBuffer 是串行的：上一块 updating 未结束就 append 会抛 QueueingFailed
+          const appendAndWait = async (buf) => {
+            if (sb.updating) {
+              await new Promise((r) => sb.addEventListener('updateend', r, { once: true }));
+            }
+            sb.appendBuffer(buf);
+            await new Promise((r) => sb.addEventListener('updateend', r, { once: true }));
+          };
+
+          function updateLoop() {
+            self.streamStats.elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+            requestAnimationFrame(updateLoop);
+          }
+          requestAnimationFrame(updateLoop);
+
+          try {
+            self.updateStatus('连接中 (MP3 流式)...', 'info');
+            const response = await fetch(baseUrl + '/v1/audio/speech', {
+              method: 'POST',
+              headers: {
+                'Authorization': 'Bearer ' + apiKey,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(body),
+            });
+            if (!response.ok) {
+              throw new Error(await self.errorMessageFrom(response));
+            }
+            self.updateStatus('🎵 MP3 流式播放中...', 'success');
+            const reader = response.body.getReader();
+            self.streamReader = reader;
+
+            let first = true;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) {
+                self.streamReader = null;
+                break;
+              }
+              if (self.streamStats.ttfb === 0) {
+                self.streamStats.ttfb = Date.now() - startTime;
+              }
+              self.streamStats.size += value.length;
+              chunks.push(value);
+              await appendAndWait(value);
+              if (first) {
+                first = false;
+                self.streamStats.playStart = Date.now() - startTime;
+                self.$nextTick(() => {
+                  self.$refs.audioPlayer.play().catch(e => console.warn('Autoplay blocked:', e));
+                });
+              }
+              self.updateStatus('接收中 ' + (self.streamStats.size / 1024).toFixed(0) + 'KB...', 'info');
+            }
+            if (self.streamStats.size === 0) {
+              throw new Error('服务器返回了 0 字节音频，通常是请求在边缘被中断，请缩短文本后重试。');
+            }
+            ms.endOfStream();
+            const blob = new Blob(chunks, { type: 'audio/mpeg' });
+            self.downloadUrl = URL.createObjectURL(blob);
+            self.downloadExt = 'mp3';
+            self.showDownloadBtn = true;
+            self.updateStatus('✅ MP3 流式完成！首字节 ' + (self.streamStats.ttfb / 1000).toFixed(3) + 's，开始播放 ' + (self.streamStats.playStart / 1000).toFixed(3) + 's', 'success');
+          } catch (error) {
+            self.updateStatus('❌ ' + error.message, 'error');
+            throw error;
+          }
+        },
+
         // PCM 转 WAV (用于下载)
         pcmToWav(pcmData, sampleRate) {
           const numChannels = 1;

@@ -21,7 +21,7 @@ test('repeated /v1/models requests hit upstream only once', async () => {
     for (let i = 0; i < 5; i++) {
       const res = await worker.fetch(req('/v1/models'), ANON, {});
       assert.equal(res.status, 200);
-      assert.equal((await res.json()).length, 322, 'full list on every call');
+      assert.equal((await res.json()).length, 332, 'full list on every call');
     }
     assert.equal(mock.calls.voices, 1, '5 requests, 1 upstream fetch');
   });
@@ -65,9 +65,9 @@ test('filters operate on the cached list and do not poison it', async () => {
     const ml = await (await worker.fetch(req('/v1/models?multilingual=true'), ANON, {})).json();
     const again = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
 
-    assert.equal(all.length, 322);
+    assert.equal(all.length, 332);
     assert.equal(ml.length, 12, 'multilingual subset');
-    assert.equal(again.length, 322, 'unfiltered request still sees the full list');
+    assert.equal(again.length, 332, 'unfiltered request still sees the full list');
     assert.equal(mock.calls.voices, 1);
   });
 });
@@ -75,7 +75,7 @@ test('filters operate on the cached list and do not poison it', async () => {
 test('upstream failure after a successful fetch serves the stale cache, with a warning', async () => {
   await withMock({}, async (mock) => {
     // 1. warm the cache with a good fetch
-    assert.equal((await (await worker.fetch(req('/v1/models'), ANON, {})).json()).length, 322);
+    assert.equal((await (await worker.fetch(req('/v1/models'), ANON, {})).json()).length, 332);
     assert.equal(mock.calls.voices, 1);
 
     // 2. force the TTL to look expired without clearing the cached data, then break
@@ -91,7 +91,7 @@ test('upstream failure after a successful fetch serves the stale cache, with a w
       const res = await worker.fetch(req('/v1/models'), ANON, {});
       assert.equal(res.status, 200);
       const models = await res.json();
-      assert.equal(models.length, 322, 'served the full stale list, not the 2-voice fallback');
+      assert.equal(models.length, 332, 'served the full stale list, not the 2-voice fallback');
       // Degradation must leave a trace — silently serving stale data is undebuggable.
       assert.ok(
         mock.logs.some((l) => l.level === 'warn' && l.msg.includes('过期缓存')),
@@ -179,17 +179,18 @@ test('only true/1 enable a filter; anything else is ignored', async () => {
   });
 });
 
-test('?neural is a documented no-op: every upstream voice is Neural', async () => {
-  // Kept for backward compatibility with existing callers rather than removed, but it
-  // cannot filter anything. Pinning this stops someone "fixing" the docs the wrong way.
+test('?neural keeps all edge voices; the 10 volc voices (no "Neural" in id) are excluded', async () => {
+  // 历史上这是恒 no-op（322 个 edge 音色全部含 Neural）。并入火山引擎后语义微调：
+  // ?neural=true 等价于"只看 edge"——老调用方拿到的仍是原来的 322 个，无行为回退。
   await withMock({}, async () => {
     const all = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
     const neural = await (await worker.fetch(req('/v1/models?neural=true'), ANON, {})).json();
-    assert.equal(neural.length, all.length, '?neural cannot narrow the list');
+    assert.equal(all.length, 332);
+    assert.equal(neural.length, 322, '?neural now means edge-only (volc ids lack "Neural")');
     assert.equal(
-      all.filter((m) => !m.id.includes('Neural')).length,
+      neural.filter((m) => m.owned_by !== 'microsoft').length,
       0,
-      'the premise: no non-Neural voice exists upstream'
+      'the premise: every Neural id is an edge voice'
     );
   });
 });
@@ -208,7 +209,7 @@ test('?neural is a documented no-op: every upstream voice is Neural', async () =
 test('no voice description contains undefined or null', async () => {
   await withMock({}, async () => {
     const models = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
-    assert.equal(models.length, 322, 'the fixture is the full upstream list');
+    assert.equal(models.length, 332, 'fixture(322) + volc(10) after the merge');
     const broken = models.filter(
       (m) => !m.description || /undefined|null/.test(m.description)
     );
@@ -238,11 +239,18 @@ test('every model carries the fields the UI relies on', async () => {
   await withMock({}, async () => {
     const models = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
     for (const m of models) {
-      assert.match(m.id, /^[a-z]{2,3}(-[A-Za-z0-9]+)+$/, 'id is a usable ShortName: ' + m.id);
-      assert.match(m.language, /^[a-z]{2,3}-/, m.id + ': language looks like a locale');
       assert.ok(['Male', 'Female'].includes(m.gender), m.id + ': gender is set');
       assert.equal(m.object, 'model');
-      assert.equal(m.owned_by, 'microsoft');
+      if (m.owned_by === 'volcengine') {
+        // 火山音色：下划线命名 + 两字母语言码（UI 用 owned_by 分流到火山引擎）
+        assert.match(m.id, /^(zh|en|jp)_(fe)?male_[a-z]+$/, 'volc id shape: ' + m.id);
+        assert.ok(['zh', 'en', 'ja'].includes(m.language), m.id + ': volc language is a 2-letter code');
+        assert.ok(m.description && !/undefined/.test(m.description), m.id + ': volc label is set');
+      } else {
+        assert.equal(m.owned_by, 'microsoft');
+        assert.match(m.id, /^[a-z]{2,3}(-[A-Za-z0-9]+)+$/, 'id is a usable ShortName: ' + m.id);
+        assert.match(m.language, /^[a-z]{2,3}-/, m.id + ': language looks like a locale');
+      }
     }
   });
 });
@@ -275,7 +283,7 @@ test('every concurrent request gets the stale cache when upstream is down', asyn
   await withMock({}, async (mock) => {
     // Warm the cache, then expire it so the next call attempts a refresh.
     const warm = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
-    assert.equal(warm.length, 322);
+    assert.equal(warm.length, 332);
     __test__.expireVoicesCache();
 
     // Count here rather than via mock.calls.voices: these requests are answered by the
@@ -299,7 +307,7 @@ test('every concurrent request gets the stale cache when upstream is down', asyn
       );
       assert.deepEqual(
         lengths,
-        [322, 322, 322, 322, 322],
+        [332, 332, 332, 332, 332],
         'all callers must see the same stale list, not a mix of 322 and the fallback'
       );
       // Coalescing must survive the fix: one upstream attempt for the whole burst.

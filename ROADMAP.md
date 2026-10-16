@@ -24,7 +24,7 @@ P2 里 6/7 已完成或裁定。**唯一还值得做的是「让 GitLab 也能�
 | ~~3. 用日志回答维度问题~~ ✅ **已做** | 用新日志跑了三轮维度普查（voice / format / chunks），**每一轮都抓到真 bug** | 见下方「日志驱动的三轮普查」 |
 | ~~4. `cleanText` 脏数据来源注释~~ ✅ 已完成 | 三处补上来源与后果 | 见 P2 |
 | ~~5. GitLab 跑 browser e2e~~ ✅ **已完成** | 拆出 `test:browser` job（`node:22-bookworm-slim` + apt chromium），21 项**全跑、0 skip** | 见下方「双 CI 覆盖」 |
-| 6. TS 化 / 前端拆分 | `ui/index.html` 已 2463 行 | 大改动、零用户可见收益，**不建议现在动** |
+| 6. TS 化 / 前端拆分 | `ui/index.html` 已 2363 行 | 大改动、零用户可见收益，**不建议现在动** |
 
 **明确不做**（都有实测依据，不是拖延）：
 - **P1-5 MP3 帧级拼接** —— 实测每边界仅 130ms padding、0 处可感知断点、ffmpeg 零告警。
@@ -378,7 +378,7 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 | ~~**版本号漂移**~~ ✅ | 已修（2.28.1）：`package.json` 曾停在 2.20.0 而 CHANGELOG/tag 已 2.22.0，且无守护。现有一致性测试比对 `package.json` 与 CHANGELOG 首个版本号（刻意**不查 git tag** —— 测试必须能在浅克隆与无 `.git` 的 tarball 里通过） |
 | ~~让 GitLab 也能跑 browser e2e~~ ✅ | 已完成（2.30.0）：拆出 `test:browser` job。镜像是**实测选出来的**，探针分支一次流水线并行试了三个 —— `zenika/alpine-chrome:with-node` 有 Chromium 124 但 Node 只有 20.15（本仓库用 22）；`mcr.microsoft.com/playwright` 有 Node 22 但 Chrome 不在任何标准路径下，`cdp.mjs` 找不到；`node:22-bookworm-slim` + apt chromium 两项都对（Node 22.23 + Chromium 151），实测 21 项全跑、0 skip |
 | TypeScript 化 | 现为 JS。加 `// @ts-check` + JSDoc 是低成本折中，无需改造构建 |
-| 前端拆分 | `ui/index.html` 已 **2463 行**（原记 1200+），含 322 语音的语言映射表。可抽出数据表 |
+| 前端拆分 | `ui/index.html` 已 **2363 行**（原记 1200+），含 322 语音的语言映射表。可抽出数据表 |
 | ~~语音列表缓存~~ ✅ | 已完成：进程内 6 小时缓存 + `Cache-Control: max-age=21600`；并发合并；上游故障时返回过期缓存(留 warn 痕迹)，冷启动失败才降级到内置列表(`no-store`) |
 | ~~`cleanText` 的容错来源注释~~ ✅ | 已完成（2.26.0）：`remove_urls` / `custom_keywords` / `remove_line_breaks` 三处补上「脏数据从哪来、不容错的后果是什么」。其中 `remove_line_breaks` 注明了**必须放在最后**的原因：前面每条清理都会产生新的连续空白 |
 | ~~前端 e2e~~ ✅ | 已完成：用**裸 CDP**(本机 Chrome + Node 内置 WebSocket)驱动真实浏览器，**零依赖**、不引入 Playwright。现有 **19 项** browser 测试（原记 8 项）。无 Chrome 时自动 skip。**首次运行即抓到一个真实 bug**(见 CHANGELOG 2.8.0) |
@@ -390,7 +390,7 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 
 | 维度 | 数字 | 备注 |
 |---|---|---|
-| 生产代码 | `src/worker.js` **1708** 行 + `ui/index.html` **2463** 行 | 单文件 Worker + 内嵌 Vue SPA |
+| 生产代码 | `src/worker.js` **1941** 行 + `ui/index.html` **2458** 行 | 单文件 Worker + 内嵌 Vue SPA |
 | 测试代码 | **9283** 行 / **359** 项（347 跑 + 12 需凭证 skip） | 测试:源码 ≈ **2.2:1** |
 | `src/worker.js` 覆盖率 | **99.47% 行 / 97.76% 分支** | 未覆盖仅 2 处，均为**已证不可达**的防御分支（catch-all 处理器；`input_empty_after_cleaning` 已穷举 5768 种组合证明不可达） |
 | 运行时依赖 | **0** | `node_modules` 空；构建与测试只用 Node 内置能力 |
