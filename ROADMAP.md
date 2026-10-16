@@ -390,7 +390,7 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 
 | 维度 | 数字 | 备注 |
 |---|---|---|
-| 生产代码 | `src/worker.js` **1941** 行 + `ui/index.html` **2458** 行 | 单文件 Worker + 内嵌 Vue SPA |
+| 生产代码 | `src/worker.js` **1998** 行 + `ui/index.html` **2565** 行 | 单文件 Worker + 内嵌 Vue SPA |
 | 测试代码 | **9283** 行 / **359** 项（347 跑 + 12 需凭证 skip） | 测试:源码 ≈ **2.2:1** |
 | `src/worker.js` 覆盖率 | **99.47% 行 / 97.76% 分支** | 未覆盖仅 2 处，均为**已证不可达**的防御分支（catch-all 处理器；`input_empty_after_cleaning` 已穷举 5768 种组合证明不可达） |
 | 运行时依赖 | **0** | `node_modules` 空；构建与测试只用 Node 内置能力 |

@@ -100,16 +100,20 @@ function resolveEngine(model, voice) {
   if (typeof voice === "string" && Object.prototype.hasOwnProperty.call(VOLC_VOICES, voice)) return "volc";
   return "edge";
 }
-// 纯函数：校验并解析火山合成响应。status_code!=0 或 audio.data 缺失都算失败，
-// 把上游错误码带出来，调用方映射成 errorResponse。
+// 纯函数：校验并解析火山合成响应。失败分三类，调用方的处置完全不同：
+//   business  —— base_resp.status_code != 0，确定性的调用方问题（音色不存在等）→ 400，不重试
+//   no_audio  —— 200 但没有 audio.data，上游侧故障 → 502 upstream_empty_audio（与 edge 同语义），可重试
+//   malformed —— 响应不是 JSON 对象（代理拦截页等瞬时垃圾）→ 500，可重试一次
+// 三类混在一起曾是真实 bug：unparseable/no_audio 也被当成业务错误回 400 并禁重试，
+// 把服务端故障归因给调用方，违反 README 的 Failure Attribution 原则。
 function parseVolcResponse(json) {
-  if (!json || typeof json !== "object") return { ok: false, errCode: "unparseable", errMsg: "响应不是 JSON" };
+  if (!json || typeof json !== "object") return { ok: false, kind: "malformed", errCode: "unparseable", errMsg: "响应不是 JSON 对象" };
   var base = json.base_resp || {};
   if (base.status_code !== 0 && base.status_code !== undefined) {
-    return { ok: false, errCode: String(base.status_code), errMsg: base.status_message || "上游拒绝" };
+    return { ok: false, kind: "business", errCode: String(base.status_code), errMsg: String(base.status_message || "上游拒绝").slice(0, 200) };
   }
   var data = json.audio && json.audio.data;
-  if (typeof data !== "string" || !data) return { ok: false, errCode: "no_audio", errMsg: "上游未返回音频" };
+  if (typeof data !== "string" || !data) return { ok: false, kind: "no_audio", errCode: "no_audio", errMsg: "上游未返回音频" };
   return { ok: true, data: data };
 }
 // ------------------------------------------------------------------ 结构化日志
@@ -165,6 +169,7 @@ async function emitLog(ctx, res, extra) {
     ms: Date.now() - ctx.t0,
     upstream: ctx.upstreamCalls,
     retries: ctx.retries,
+    ...(ctx.engine ? { engine: ctx.engine } : {}),
     ...(ctx.voice ? { voice: ctx.voice } : {}),
     ...(ctx.format ? { format: ctx.format } : {}),
     ...(ctx.chunks !== undefined ? { chunks: ctx.chunks } : {}),
@@ -230,11 +235,16 @@ async function handleRequest(request, env) {
     const authHeader = request.headers.get("authorization") || "";
     const presented = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
     if (!timingSafeEqual(presented, env.API_KEY)) {
+      // 鉴权失败也要留痕（否则暴力 probing 不可观测）。用独立的 "ev":"auth" 而不是
+      // "ev":"req"：保持「401 永不产生请求形状遥测行」的既有保证不变 —— 未认证调用方
+      // 无法向 req 遥测管道灌注数据，auth 行只是按 level 可过滤的紧凑计数素材。
+      console.warn(JSON.stringify({ ev: "auth", status: 401, code: "invalid_api_key" }));
       return errorResponse("无效的 API 密钥", 401, "invalid_api_key");
     }
   }
   // 在这里(而不是每个 return 处)埋日志：handleSpeechRequest 有 20 个出口，逐个包裹既
-  // 冗长又必然漏掉新增的那个。这里是唯一的漏斗，所有响应都要经过。
+  // 冗长又必然漏掉新增的那个。这里是主要漏斗 —— 鉴权短路与公开 models 端点刻意
+  // 除外（401 有独立的 warn 日志；公开列表请求量大且无鉴权面，不逐条记）。
   const logCtx = newLogCtx(url.pathname);
   try {
     if (url.pathname === "/v1/audio/speech") {
@@ -615,6 +625,7 @@ async function handleSpeechRequest(request, logCtx = null) {
   // ttsArgs 是位置参数、且调用点用 `...ttsArgs, label` 追加 label，所以**不能**往这个
   // 数组里塞新元素 —— 那会把 label 挤到后面一位。logCtx 作为独立参数单独传。
   const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
+  if (logCtx) logCtx.engine = "edge";
   if (stream) {
     return await streamVoice(
       textChunks,
@@ -803,6 +814,15 @@ function filterModels(models, url) {
   return out;
 }
 
+function fallbackModelsList() {
+  // 上游全挂且无缓存时的最小可用列表：两个 edge 默认音色 + 完整的火山静态表
+  // （火山表不依赖上游）。两个 models 端点共用，避免公开端点 500 / 鉴权端点 200 的分叉。
+  return [
+    { id: "zh-CN-XiaoxiaoNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Female", description: "晓晓 - 温柔女声" },
+    { id: "zh-CN-YunxiNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Male", description: "云希 - 阳光男声" }
+  ].concat(volcModels());
+}
+
 async function handlePublicModelsRequest(request) {
   const wrongMethod = modelsMethodCheck(request);
   if (wrongMethod) return wrongMethod;
@@ -818,7 +838,12 @@ async function handlePublicModelsRequest(request) {
     });
   } catch (error) {
     console.error("获取语音列表失败:", error);
-    return errorResponse("Failed to fetch voices", 500, "fetch_error");
+    // 与鉴权端点同款兜底（提取共用）：上游全挂时返回最小可用列表而不是 500 ——
+    // 内置 UI 走的正是这个公开端点，500 会让音色卡直接空掉。
+    // 火山音色是本地静态表，降级时完整可用；edge 只保留两个默认音色。
+    return new Response(JSON.stringify(fallbackModelsList()), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...makeCORSHeaders() }
+    });
   }
 }
 async function handleModelsRequest(request) {
@@ -836,12 +861,7 @@ async function handleModelsRequest(request) {
     });
   } catch (error) {
     console.error("获取语音列表失败:", error);
-    const fallbackModels = [
-      { id: "zh-CN-XiaoxiaoNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Female", description: "晓晓 - 温柔女声" },
-      { id: "zh-CN-YunxiNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Male", description: "云希 - 阳光男声" }
-    ];
-    // 火山音色是本地静态表，不依赖上游，降级时也完整可用
-    fallbackModels.push(...volcModels());
+    const fallbackModels = fallbackModelsList();
     // 兜底列表不缓存：它是降级产物，不该被边缘/浏览器当成 6 小时有效的正常结果
     return new Response(JSON.stringify(fallbackModels), {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...makeCORSHeaders() }
@@ -872,7 +892,7 @@ async function streamVoice(textChunks, concurrency, fetchChunk, contentType, log
       console.error("流式 TTS 失败:", error);
       // 头已发出，HTTP 状态无法再改，但日志必须体现「这条流是断的」——
       // 否则一个中途失败的流在聚合里与成功的流长得一样。
-      emitLog(logCtx, null, { status: 200, phase: "stream_broken", err: error?.status || "error" });
+      emitLog(logCtx, null, { status: 200, phase: "stream_broken", err: error?.volcCode || error?.status || "error" });
     });
   return new Response(readable, {
     headers: { "Content-Type": contentType, ...makeCORSHeaders() }
@@ -1326,9 +1346,10 @@ async function handleVolcSpeech(cleanedInput, requestBody, logCtx) {
       "invalid_voice"
     );
   }
-  // 未传 response_format 时按 OpenAI 语义默认 mp3（主路径的默认值在解构里，
-  // 这里拿到的是原始 body，需要自己兜底 —— 否则省略该字段的调用会被误拒）
-  const volcFormat = requestBody.response_format ?? "mp3";
+  // 未传 response_format 时按 OpenAI 语义默认 mp3。注意只兜 undefined：显式传 null
+  // 与 edge 的行为一致（解构默认值只对 undefined 生效）会被下面的校验拒绝，不能
+  // 悄悄当成默认值放行 —— 两引擎对同一非法输入应有一致的拒绝行为。
+  const volcFormat = requestBody.response_format === undefined ? "mp3" : requestBody.response_format;
   if (volcFormat !== "mp3") {
     return errorResponse(
       `火山引擎仅支持 mp3 输出，收到 ${JSON.stringify(volcFormat)}`,
@@ -1348,11 +1369,16 @@ async function handleVolcSpeech(cleanedInput, requestBody, logCtx) {
     );
   }
   const textChunks = smartChunkText(volcText, safeChunkSize);
-  if (textChunks.length === 0 || textChunks.length > LIMITS.MAX_CHUNKS) {
-    return errorResponse("文本分块结果为空或过多", 413, "too_many_chunks");
+  // 空块与超限分开报：空块是输入问题（400），与 edge 路径同一 code；超限才是 413
+  if (textChunks.length === 0) {
+    return errorResponse("文本分块结果为空", 400, "input_empty_after_cleaning");
+  }
+  if (textChunks.length > LIMITS.MAX_CHUNKS) {
+    return errorResponse("火山分块过多", 413, "too_many_chunks");
   }
   const safeConcurrency = clamp(requestBody.concurrency, LIMITS.MIN_CONCURRENCY, LIMITS.MAX_CONCURRENCY, VOLC_CONCURRENCY);
   if (logCtx) {
+    logCtx.engine = "volc";
     logCtx.voice = voice;
     logCtx.format = "mp3";
     logCtx.chunks = textChunks.length;
@@ -1384,14 +1410,28 @@ async function handleVolcSpeech(cleanedInput, requestBody, logCtx) {
     });
   } catch (error) {
     console.error("火山 TTS 失败:", error);
-    // 业务错误（base_resp.status_code!=0）是确定性的调用方问题 —— 音色不存在、参数
-    // 非法等，映射 400 让调用方去改参数，而不是误报服务端 500。
+    // 错误归因（与 README 的 Failure Attribution 对齐：4xx = 改请求，5xx = 上游/服务端）：
+    //   volcCode     —— 上游业务错误（确定性），映射 400 让调用方改参数
+    //   emptyAudio   —— 200 但无音频数据，上游侧故障 → 502（与 edge 的 upstream_empty_audio 同语义）
+    //   fromLangdetect —— 语言检测失败（请求体只有文本，无调用方可改项）→ 5xx
+    //   TTS 端点 4xx —— 文本/音色触发的上游拒绝 → 400
+    //   其余（网络/5xx/畸形响应重试耗尽）→ 500
     if (error?.volcCode) {
       return errorResponse(
         `火山上游拒绝了请求（火山错误码 ${error.volcCode}）：${error.message}`,
         400,
         "upstream_rejected_request"
       );
+    }
+    if (error?.emptyAudio) {
+      return errorResponse(
+        "火山上游返回了空音频（200 但无数据）。多为瞬时故障，请重试；若持续出现请检查文本语言与音色是否匹配。",
+        502,
+        "upstream_empty_audio"
+      );
+    }
+    if (error?.fromLangdetect) {
+      return errorResponse(`火山语言检测失败：${error.message}`, 500, "tts_generation_error");
     }
     if (error?.status >= 400 && error.status < 500) {
       return errorResponse(`火山上游拒绝了请求（HTTP ${error.status}）：${error.message}`, 400, "upstream_rejected_request");
@@ -1400,23 +1440,32 @@ async function handleVolcSpeech(cleanedInput, requestBody, logCtx) {
   }
 }
 async function volcDetectLanguage(text) {
-  const resp = await fetch(VOLC_API.LANGDETECT, {
-    method: "POST",
-    headers: VOLC_API.HEADERS,
-    body: JSON.stringify({ text })
-  });
-  if (!resp.ok) {
-    const err = new Error(`langdetect HTTP ${resp.status}`);
-    err.status = resp.status;
-    throw err;
+  // langdetect 也做一次退避重试：它和 TTS 端点同属匿名通道，瞬时抖动同源。
+  // 失败统一打 fromLangdetect 标记 —— langdetect 的请求体只有文本，不存在调用方
+  // 可修正的字段，它的 4xx（限流 403/429 等）必须归因为服务端 5xx，不能落进
+  // catch 里"TTS 端点 4xx → 400"的分支。
+  for (var attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const resp = await fetch(VOLC_API.LANGDETECT, {
+        method: "POST",
+        headers: VOLC_API.HEADERS,
+        body: JSON.stringify({ text })
+      });
+      if (!resp.ok) {
+        const err = new Error(`langdetect HTTP ${resp.status}`);
+        err.fromLangdetect = true;
+        throw err;
+      }
+      const json = await resp.json();
+      const lang = json && json.language;
+      if (typeof lang !== "string" || !lang) throw new Error("langdetect 未返回语言");
+      return lang;
+    } catch (error) {
+      if (!error.fromLangdetect) error.fromLangdetect = true;
+      if (attempt === 2) throw error;
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
-  const json = await resp.json();
-  const lang = json && json.language;
-  if (typeof lang !== "string" || !lang) {
-    const err = new Error("langdetect 未返回语言");
-    throw err;
-  }
-  return lang;
 }
 async function getVolcAudioChunk(text, speaker, language, label = "", logCtx = null) {
   // 上游偶发抖动时重试一次；连续两次失败才算这块失败
@@ -1436,14 +1485,25 @@ async function getVolcAudioChunk(text, speaker, language, label = "", logCtx = n
       const parsed = parseVolcResponse(await resp.json());
       if (!parsed.ok) {
         const err = new Error(parsed.errMsg);
-        err.volcCode = parsed.errCode;
-        err.noRetry = true;   // 业务错误是确定性的（音色/参数问题），重试只会再失败一次
+        if (parsed.kind === "business") {
+          err.volcCode = parsed.errCode;
+          err.noRetry = true;   // 业务错误是确定性的（音色/参数问题），重试只会再失败一次
+        } else if (parsed.kind === "no_audio") {
+          err.emptyAudio = true;   // 上游侧故障，允许重试
+        }
+        // malformed 不打标记 → 走默认可重试路径
         throw err;
       }
       const bytes = await base64ToBytes(parsed.data);
       return new Blob([bytes], { type: "audio/mpeg" });
     } catch (error) {
-      if (error?.noRetry || attempt === 2) throw error;
+      // 重试策略与 edge 对齐：只有网络错误 / 401 / 408 / 429 / 5xx / 响应畸形值得重试。
+      // 确定性 4xx（400/403/404）重试只是白烧 subrequest 配额。
+      const status = error?.status;
+      const retryable = error?.noRetry
+        ? false
+        : !status || status === 401 || status === 408 || status === 429 || status >= 500;
+      if (!retryable || attempt === 2) throw error;
       if (logCtx) logCtx.retries++;
       console.warn(`火山分块${label}第 ${attempt} 次失败（${error.volcCode || error.status || "network"}），重试`);
       await new Promise((r) => setTimeout(r, 200));
@@ -1865,7 +1925,6 @@ var ERROR_PARAM = {
   input_empty_after_cleaning: "input",
   too_many_chunks: "chunk_size",
   stream_format_not_chunkable: "response_format",
-  opus_requires_single_chunk: "response_format",
   payload_too_large: "input",
   invalid_api_key: "Authorization",
   upstream_rejected_request: "voice",

@@ -248,7 +248,9 @@ test('/v1/models falls back to a built-in list when upstream fails', async () =>
   });
 });
 
-test('/v1/models/public reports 500 when upstream fails (no fallback there)', async () => {
+test('/v1/models/public serves the fallback list when upstream fails (shared with the authed endpoint)', async () => {
+  // 旧行为是 500 fetch_error；统一兜底后两个 models 端点行为一致：200 + 最小列表
+  // （2 个 edge 默认音色 + 10 个火山静态音色），Cache-Control: no-store 防止降级结果被缓存。
   await withMock({}, async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = async (input, init) => {
@@ -258,8 +260,11 @@ test('/v1/models/public reports 500 when upstream fails (no fallback there)', as
     };
     try {
       const res = await worker.fetch(req('/v1/models/public'), ANON, {});
-      assert.equal(res.status, 500);
-      assert.equal((await res.json()).error.code, 'fetch_error');
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('Cache-Control'), 'no-store');
+      const models = await res.json();
+      assert.equal(models.length, 12);
+      assert.ok(models.some((m) => m.owned_by === 'volcengine'));
     } finally {
       globalThis.fetch = realFetch;
     }
