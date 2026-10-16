@@ -11,7 +11,7 @@
 [![Coverage](https://img.shields.io/badge/coverage-99.47%25-brightgreen)](#开发)<br/>
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
 [![OpenAI compatible](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)](#api)
-[![Voices](https://img.shields.io/badge/voices-322-8A2BE2)](#get-v1models-get-v1modelspublic)
+[![Voices](https://img.shields.io/badge/voices-332-8A2BE2)](#get-v1models-get-v1modelspublic)
 [![Runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)](#开发)
 [![Live](https://img.shields.io/badge/live-edgetts.aws.xin-F38020?logo=cloudflare&logoColor=white)](https://edgetts.aws.xin)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -19,7 +19,7 @@
 **[English](README.md)** · **[路线图](ROADMAP.md)** · **[更新日志](CHANGELOG.md)** · **[交接文档](docs/HANDOFF.md)**
 
 一个 Cloudflare Worker，把微软 Edge / Azure TTS 封装成一套**兼容 OpenAI** 的语音合成
-API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。无服务器、全球边缘、免费额度友好。
+API —— 支持真流式播放、双引擎 332 个音色（Edge 322 + 火山翻译 10）、内置 Web UI，零运维。无服务器、全球边缘、免费额度友好。
 
 > **在线服务：** [edgetts.aws.xin](https://edgetts.aws.xin) —— 直接用网页，或 `POST /v1/audio/speech`。
 
@@ -28,8 +28,11 @@ API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。�
 ## 特性
 
 - 🎙️ **322 个音色，40+ 语言** —— 微软全部神经网络音色，含多语言音色。
-- ⚡ **真流式** —— 用 `response_format: "pcm"` 时首个分块即可开播并完整播到结束
-  （MP3 等容器格式无法边收边播，详见[流式说明](#流式)）。
+- 🔀 **双引擎，全部免费** —— `model` 字段路由：默认 `tts-1` 走 **Edge TTS**（微软）；
+  `volc-tts`（或直接传火山音色名）走 **火山翻译**（字节系匿名通道，10 个音色含四川话与
+  日语，同样免 key）。见[引擎路由](#引擎路由edge-tts--火山翻译)。
+- ⚡ **真流式** —— Edge 用 `response_format: "pcm"`、火山直接用 `mp3`，首个分块即可开播并完整播到结束
+  （容器格式无法边收边播的说明见[流式](#流式)）。
 - 🧩 **兼容 OpenAI** —— `POST /v1/audio/speech`，可直接替换 OpenAI TTS。
 - 🚀 **并发合成** —— 长文本按句分块，交给工作池并发合成后**保序**返回。线上实测：600 字符
   切成 12 块，串行 3683ms、并发 10 时 918ms —— **4.0 倍**提速，且各并发档位输出逐字节相同。
@@ -41,7 +44,8 @@ API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。�
 
 ## Web 界面
 
-浏览器打开 `/`。322 个音色可按语言、地区、性别、「仅多语言」逐层筛选，也可直接搜名字 /
+浏览器打开 `/`。音色卡顶部可在 **Edge TTS（322 音色）** 与 **火山翻译（10 音色）** 两个引擎
+标签间切换；322 个 Edge 音色可按语言、地区、性别、「仅多语言」逐层筛选，也可直接搜名字 /
 ShortName。每个音色都展示完整 `ShortName` 并带一键复制，方便直接粘进 API 调用。
 选择器是标准的 **radio group**：方向键 / Home / End 移动并选中、Enter 与空格确认、焦点环
 可见 —— 322 个音色全部可键盘到达，读屏也会正确播报当前选择。播放时绘制
@@ -91,12 +95,13 @@ npx wrangler deploy
 
 ```jsonc
 {
+  "model": "tts-1",                // 引擎路由：tts-1/省略 = Edge；volc-tts/volc = 火山翻译
   "input": "要合成的文本。",       // 必填，长度上限见下文
-  "voice": "zh-CN-XiaoxiaoNeural", // 或 OpenAI 别名：alloy/echo/fable/onyx/nova/shimmer
-  "speed": 1.0,                     // 0.25–4.0
-  "pitch": 1.0,                     // 0.5–1.5
-  "style": "general",              // 表达风格
-  "response_format": "mp3",        // mp3 | opus | wav（pcm 为流式内部使用）
+  "voice": "zh-CN-XiaoxiaoNeural", // Edge：ShortName 或 OpenAI 别名；火山：如 zh_female_sichuan
+  "speed": 1.0,                     // 0.25–4.0（仅 Edge）
+  "pitch": 1.0,                     // 0.5–1.5（仅 Edge）
+  "style": "general",              // 表达风格（仅 Edge）
+  "response_format": "mp3",        // Edge: mp3|opus|wav；火山: 仅 mp3
   "stream": false,                  // true → 裸音频流
   "cleaning_options": { }           // 合成前清理 markdown/emoji/url 等
 }
@@ -110,6 +115,50 @@ npx wrangler deploy
 原因：`invalid_request_error` 既是「body 不是 JSON」也是「input 缺失」，
 `invalid_cleaning_options` 既是容器类型错也是嵌套字段类型错 —— code 为了兼容既有调用方保持
 不变，靠 `param` 区分。
+
+<a name="引擎路由edge-tts--火山翻译"></a>
+#### 引擎路由：Edge TTS 与 火山翻译
+
+`model` 决定引擎；`voice` 精确命中火山音色名时也会自动路由到火山（火山音色名带下划线，
+与 Edge 的 `zh-CN-XiaoxiaoNeural` 格式天然不冲突）。省略 `model` 时行为与 `tts-1` 相同，
+存量调用方不受影响。
+
+```shell
+# Edge TTS（默认）—— 322 个微软音色，mp3/opus/wav/pcm
+curl -X POST "$BASE/v1/audio/speech" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"tts-1","voice":"zh-CN-XiaoxiaoNeural","input":"你好，世界"}' \
+  --output edge.mp3
+
+# 火山翻译 —— 10 个音色，免 key 匿名通道
+curl -X POST "$BASE/v1/audio/speech" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"volc-tts","voice":"zh_female_sichuan","input":"要得，没得问题"}' \
+  --output volc.mp3
+
+# 不写 model，直接传火山音色名也可以 —— 按音色自动路由
+curl -X POST "$BASE/v1/audio/speech" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"voice":"jp_female_hana","input":"こんにちは"}' --output jp.mp3
+```
+
+火山引擎的音色（`GET /v1/models` 里 `owned_by: "volcengine"` 的 10 个）：
+
+| 音色 | 说明 |
+|---|---|
+| `zh_female_qingxin` / `zh_female_zhubo` / `zh_male_zhubo` | 清新女声 / 女主播 / 男主播（中英混） |
+| `zh_female_story` / `zh_male_xiaoming` / `zh_male_rap` | 少儿故事 / 影视男解说 / 嘻哈男歌手（中英混） |
+| `zh_female_sichuan` | **四川女声**（川英混） |
+| `en_female_sarah` | 澳英女声 |
+| `jp_male_satoshi` / `jp_female_hana` | 日语男 / 女声 |
+
+火山引擎的能力边界（由上游接口决定）：
+
+- 仅支持 `response_format: "mp3"`，其他格式返回 400 `invalid_response_format`
+- 不支持 `speed` / `pitch` / `style` 与 `<break>` 停顿标签（停顿标签会被替换为逗号），
+  这些参数传了会被忽略
+- `stream: true` 有效，且是 **MP3 分块渐进下发**（见[流式](#流式)）
+- 长文本同样分块并发合成；上游业务错误（如音色不存在）映射为 400 并透出火山错误码
 
 <a name="流式"></a>
 #### 流式
@@ -129,6 +178,11 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 
 非流式请求则返回正常的 MP3/Opus/WAV 文件。
 
+**火山引擎是上述 PCM 规则的例外**：火山的流式是 **MP3 分块渐进下发** —— 上游本身一次性
+返回整段（没有真流式），Worker 把分块合成的结果在首块完成时即开始下发，MP3 帧自同步、
+可以边收边播（内置 Web UI 用 MSE `audio/mpeg` 实现立即开播）。实测：145 秒的音频下载仅
+约 4 秒，首字节后即可开播。所以：**Edge 流式用 `pcm`，火山流式用 `mp3`**。
+
 #### 上游返回空音频会被拒绝，不会透传
 
 当音色对输入文本的**书写系统完全没有覆盖**时，上游返回的是 `200` + **0 字节**，并不报错。
@@ -143,14 +197,16 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 
 ### `GET /v1/models` · `GET /v1/models/public`
 
-以类 OpenAI-models 结构列出全部音色（322 个）。两个端点接受相同的查询过滤：
+以类 OpenAI-models 结构列出全部音色（**332 个 = Edge 322 + 火山 10**，`owned_by` 字段区分
+`microsoft` / `volcengine`，内置 UI 据此分流引擎）。两个端点接受相同的查询过滤：
 
 - `?multilingual=true` —— 只返回多语言音色（322 个里的 12 个）。**文本书写系统不固定时就该用
   这些**：线上普查实测 12 个全部对 9 种书写系统都有输出，而单语音色遇到自身覆盖不到的文字会
   返回空音频（90 个交叉组合里 62 个是空的，详见
   [普查报告](docs/research/empty-audio-sweep-20260806.md)）。
-- `?neural=true` —— 为兼容既有调用方而保留，但是个 **no-op**：上游所有音色本身都是
-  Neural 音色，过滤不掉任何东西。
+- `?neural=true` —— 为兼容既有调用方而保留。对 Edge 音色仍是 **no-op**（全部含 Neural）；
+  火山音色 id 不含 Neural，会被该参数排除 —— 即 `?neural=true` 现在等价于「只看 Edge」，
+  既有调用方拿到的仍是原来的 322 个，无行为回退。
 
 列表在进程内缓存 6 小时，并带 `Cache-Control: public, max-age=21600`，重复调用不再穿透上游。
 上游故障时返回最后一次成功的列表（并打 warn 日志），而不是直接失败。
@@ -221,11 +277,11 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 
 ### 可观测性
 
-**每个请求输出恰好一行 JSON，成功的请求也有。** `wrangler.toml` 已开 `[observability]`，
+**`/v1/audio/speech` 与 `/v1/models` 的每个请求输出恰好一行 JSON，成功的请求也有。**（鉴权失败输出的是紧凑的 401 行，绝不是 `ev:"req"` 形态 —— 未认证调用方无法向遥测管道灌注请求形状的数据；公开的 `/v1/models/public` 不逐请求记录。） `wrangler.toml` 已开 `[observability]`，
 这些行可在 Workers 面板查询，也可用 Logpush 推出。
 
 ```jsonc
-{"ev":"req","route":"/v1/audio/speech","status":200,"ms":412,"upstream":4,"retries":0,
+{"ev":"req","route":"/v1/audio/speech","status":200,"ms":412,"upstream":4,"retries":0,"engine":"edge",
  "voice":"zh-CN-XiaoxiaoNeural","format":"mp3","chunks":4,"conc":10,"stream":false,"chars":901}
 ```
 
@@ -239,6 +295,7 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 | `retries` | 重试次数。有了它，「重试率」才终于有分母 |
 | `bytes` | 响应音频字节数。`0` 就是上游静默失败的样子 —— 见下方 `upstream_empty_audio` |
 | `code` | 仅 4xx/5xx 才有：与响应体里同一个机器可读错误码 |
+| `engine` | `"edge"` 或 `"volc"` —— 两条上游的用量/延迟/错误率可直接分开聚合 |
 | `voice` `format` `chunks` `conc` `stream` `chars` | 请求维度。**校验失败时是省略、不是填 null** —— 一个被拒的请求没有有意义的 voice，填 null 只会污染聚合 |
 | `degraded` | 仅在发生静默降级时出现（如 `wav_merge_declined_no_riff`） |
 | `phase` | 仅流式：`stream_end`、`stream_empty` 或 `stream_broken`。响应头一发出状态就锁在 200 了，所以这是中途断流**唯一**看得见的地方 |

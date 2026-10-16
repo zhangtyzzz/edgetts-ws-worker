@@ -11,7 +11,7 @@
 [![Coverage](https://img.shields.io/badge/coverage-99.47%25-brightgreen)](#development)<br/>
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
 [![OpenAI compatible](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)](#api)
-[![Voices](https://img.shields.io/badge/voices-322-8A2BE2)](#get-v1models-get-v1modelspublic)
+[![Voices](https://img.shields.io/badge/voices-332-8A2BE2)](#get-v1models-get-v1modelspublic)
 [![Runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)](#development)
 [![Live](https://img.shields.io/badge/live-edgetts.aws.xin-F38020?logo=cloudflare&logoColor=white)](https://edgetts.aws.xin)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -19,7 +19,7 @@
 **[中文文档 / Chinese](README_CN.md)** · **[Roadmap](ROADMAP.md)** · **[Changelog](CHANGELOG.md)** · **[Handoff / context for contributors](docs/HANDOFF.md)**
 
 A single Cloudflare Worker that turns Microsoft Edge / Azure TTS into a fast,
-**OpenAI-compatible** text-to-speech API — with true streaming playback, 322 voices,
+**OpenAI-compatible** text-to-speech API — with true streaming playback, 332 voices across two free engines (Edge 322 + Volcano 10),
 a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier friendly.
 
 > **Live:** [edgetts.aws.xin](https://edgetts.aws.xin) · try the web UI or `POST /v1/audio/speech`.
@@ -29,9 +29,13 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
 ## Why
 
 - 🎙️ **322 voices, 40+ languages** — every Microsoft neural voice, including multilingual ones.
-- ⚡ **True streaming** — with `response_format: "pcm"`, playback starts on the first chunk
-  and runs to the end (container formats like MP3 can't be played incrementally — see
-  [the streaming note](#streaming)).
+- 🔀 **Two engines, both free** — routing via `model`: the default `tts-1` uses **Edge TTS**
+  (Microsoft); `volc-tts` (or any Volcano voice name) uses **Volcano Translate** (a keyless,
+  anonymous ByteDance channel with 10 voices including Sichuan-accented Mandarin and Japanese).
+  See [Engine routing](#engine-routing-edge-tts--volcano-translate).
+- ⚡ **True streaming** — with Edge, `response_format: "pcm"` starts playback on the first chunk
+  and runs to the end; with Volcano, stream plain `mp3` (frames self-synchronize, so chunks play
+  as they arrive — see [the streaming note](#streaming)).
 - 🧩 **OpenAI-compatible** — `POST /v1/audio/speech`, drop-in for the OpenAI TTS shape.
 - 🚀 **Concurrent synthesis** — long text is sentence-chunked and synthesized through a
   work-conserving pool, then returned in chunk order. Measured on the deployed worker:
@@ -47,7 +51,9 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
 
 ## Web UI
 
-Open `/` in a browser. All 322 voices are filterable by language, region, gender, and a
+Open `/` in a browser. Engine tabs at the top of the voice card switch between **Edge TTS
+(322 voices)** and **Volcano Translate (10 voices)**. The 322 Edge voices are filterable by
+language, region, gender, and a
 “multilingual only” toggle — or search by name / ShortName. Each voice shows its full
 `ShortName` with a one-click copy button, so it drops straight into an API call.
 The picker is a proper **radio group**: arrows / Home / End move and select, Enter and Space
@@ -104,12 +110,13 @@ No dependencies to install — the build and tests use only Node's built-ins.
 
 ```jsonc
 {
+  "model": "tts-1",                 // engine routing: tts-1/omitted = Edge; volc-tts/volc = Volcano
   "input": "The text to speak.",   // required; see the length limits below
-  "voice": "en-US-AvaNeural",       // or an OpenAI alias: alloy/echo/fable/onyx/nova/shimmer
-  "speed": 1.0,                      // 0.25–4.0
-  "pitch": 1.0,                      // 0.5–1.5
-  "style": "general",               // expression style
-  "response_format": "mp3",         // mp3 | opus | wav  (pcm is used internally for streaming)
+  "voice": "en-US-AvaNeural",       // Edge: ShortName or an OpenAI alias; Volcano: e.g. zh_female_sichuan
+  "speed": 1.0,                      // 0.25–4.0 (Edge only)
+  "pitch": 1.0,                      // 0.5–1.5 (Edge only)
+  "style": "general",               // expression style (Edge only)
+  "response_format": "mp3",         // Edge: mp3 | opus | wav; Volcano: mp3 only
   "stream": false,                   // true → raw audio stream
   "cleaning_options": { }            // strip markdown/emoji/urls/etc. before synthesis
 }
@@ -125,6 +132,52 @@ matters because two codes each cover two causes: `invalid_request_error` is both
 "body is not JSON" and "input is missing", and `invalid_cleaning_options` is both a wrong
 container type and a wrong nested field — the codes are kept stable for existing callers, so
 `param` is what tells them apart.
+
+<a name="engine-routing-edge-tts--volcano-translate"></a>
+#### Engine routing: Edge TTS vs Volcano Translate
+
+`model` picks the engine; a `voice` that exactly matches a Volcano voice name also routes
+there (Volcano names use underscores, so they can never collide with Edge's
+`zh-CN-XiaoxiaoNeural` shape). Omitting `model` behaves like `tts-1` — existing callers are
+unaffected.
+
+```shell
+# Edge TTS (default) — 322 Microsoft voices, mp3/opus/wav/pcm
+curl -X POST "$BASE/v1/audio/speech" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"tts-1","voice":"zh-CN-XiaoxiaoNeural","input":"Hello"}' \
+  --output edge.mp3
+
+# Volcano Translate — 10 voices, keyless anonymous channel
+curl -X POST "$BASE/v1/audio/speech" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"volc-tts","voice":"zh_female_sichuan","input":"要得，没得问题"}' \
+  --output volc.mp3
+
+# No model needed — a Volcano voice name routes by itself
+curl -X POST "$BASE/v1/audio/speech" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"voice":"jp_female_hana","input":"こんにちは"}' --output jp.mp3
+```
+
+The Volcano voices (the 10 entries with `owned_by: "volcengine"` in `GET /v1/models`):
+
+| Voice | Notes |
+|---|---|
+| `zh_female_qingxin` / `zh_female_zhubo` / `zh_male_zhubo` | clear female / female anchor / male anchor (EN-mixed Mandarin) |
+| `zh_female_story` / `zh_male_xiaoming` / `zh_male_rap` | storytelling / film narrator / hip-hop (EN-mixed Mandarin) |
+| `zh_female_sichuan` | **Sichuan-accented female** |
+| `en_female_sarah` | Australian English |
+| `jp_male_satoshi` / `jp_female_hana` | Japanese male / female |
+
+Volcano engine limits (imposed by the upstream endpoint):
+
+- `response_format` must be `mp3`; anything else returns 400 `invalid_response_format`
+- `speed` / `pitch` / `style` and `<break>` pause tags are not supported (pause tags are
+  replaced with a comma); these parameters are accepted and ignored
+- `stream: true` works and streams **MP3 chunks progressively** (see [Streaming](#streaming))
+- Long text is chunked and synthesized concurrently, same as Edge; upstream business errors
+  (e.g. unknown voice) map to a 400 carrying the Volcano error code
 
 <a name="streaming"></a>
 #### Streaming
@@ -149,6 +202,13 @@ containers or backfill a length. Left alone it produced a 200 whose first header
 
 For non-streaming requests you get a normal MP3/Opus/WAV file.
 
+**The Volcano engine is the exception to the PCM rule.** Its stream is **progressively
+delivered MP3** — the upstream returns each chunk as a complete blob, and the Worker starts
+sending as soon as the first chunk is synthesized. MP3 frames self-synchronize, so chunks
+play as they arrive (the bundled web UI does this via MSE `audio/mpeg`). Measured: a
+145-second clip downloads in about 4 seconds, playback starts right after the first chunk.
+So: **stream `pcm` on Edge, stream `mp3` on Volcano.**
+
 #### An empty upstream response is refused, not passed on
 
 Upstream answers `200` with a **zero-byte body** when the voice has no coverage for the input's
@@ -166,15 +226,18 @@ with `bytes: 0` instead.
 
 ### `GET /v1/models` · `GET /v1/models/public`
 
-Lists the available voices (322) in an OpenAI-models-like shape. Both endpoints accept
-the same query filters:
+Lists the available voices (**332 = 322 Edge + 10 Volcano**; the `owned_by` field is
+`microsoft` / `volcengine`, which is how the bundled UI splits engines) in an
+OpenAI-models-like shape. Both endpoints accept the same query filters:
 
 - `?multilingual=true` — only the multilingual voices (12 of 322). **These are the ones to use
   when the text's script may vary**: swept live, all 12 produce audio for every one of 9 writing
   systems, while a single-language voice returns empty audio for anything outside its own script
   (62 of 90 cross-script combinations — see [the sweep](docs/research/empty-audio-sweep-20260806.md)).
-- `?neural=true` — accepted for backward compatibility, but a **no-op**: every voice
-  upstream is already a Neural voice, so nothing is filtered out.
+- `?neural=true` — accepted for backward compatibility. Still a no-op for Edge voices
+  (all of them contain "Neural"); Volcano voice ids don't, so they are excluded — i.e.
+  `?neural=true` now means "Edge only". Existing callers still get the same 322 voices,
+  no behavior change.
 
 The list is cached in-process for 6 hours and served with
 `Cache-Control: public, max-age=21600`, so repeat calls don't hit upstream. If upstream
@@ -257,11 +320,14 @@ the wrong thing. Two cases worth naming:
 
 ### Observability
 
-Every request emits exactly one JSON line, successes included. `[observability]` is enabled in
+Every `/v1/audio/speech` and `/v1/models` request emits exactly one JSON line, successes
+included. (Auth failures emit a compact 401 line instead — never a request-shaped one, so an
+unauthenticated caller cannot feed the telemetry pipeline; the public `/v1/models/public`
+endpoint is not logged per-request.) `[observability]` is enabled in
 `wrangler.toml`, so these are queryable in the Workers dashboard and pushable via Logpush.
 
 ```jsonc
-{"ev":"req","route":"/v1/audio/speech","status":200,"ms":412,"upstream":4,"retries":0,
+{"ev":"req","route":"/v1/audio/speech","status":200,"ms":412,"upstream":4,"retries":0,"engine":"edge",
  "voice":"zh-CN-XiaoxiaoNeural","format":"mp3","chunks":4,"conc":10,"stream":false,"chars":901}
 ```
 
@@ -275,6 +341,7 @@ Every request emits exactly one JSON line, successes included. `[observability]`
 | `retries` | Retried attempts, which finally gives a retry *rate* a denominator |
 | `bytes` | Response audio size. `0` is how a silent upstream failure shows up — see `upstream_empty_audio` below |
 | `code` | Present on 4xx/5xx only: the same machine-readable code as the response body |
+| `engine` | `"edge"` or `"volc"` — per-engine volume, latency and error rates aggregate directly |
 | `voice` `format` `chunks` `conc` `stream` `chars` | Request dimensions. **Omitted, not nulled, when the request failed validation** — a rejected request has no meaningful voice, and nulls would pollute aggregation |
 | `degraded` | Present only when something silently fell back (e.g. `wav_merge_declined_no_riff`) |
 | `phase` | Streams only: `stream_end`, `stream_empty`, or `stream_broken`. Once headers are out the status is stuck at 200, so this is the *only* place a mid-stream failure is visible |

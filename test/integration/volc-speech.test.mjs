@@ -166,3 +166,70 @@ test('upstream business error maps to a 400 carrying the volc code; HTTP 5xx ret
     mock.restore();
   }
 });
+
+test('failure attribution: no_audio → 502 upstream_empty_audio; malformed → 500; neither pretends to be 400', async () => {
+  // 200 但没有 audio.data：上游侧故障，不是调用方的错
+  let mock = installMockFetch({
+    volcSynth: () =>
+      new Response(JSON.stringify({ audio: {}, base_resp: { status_code: 0 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+  });
+  try {
+    const res = await worker.fetch(
+      speechRequest({ model: 'volc-tts', input: 'x', voice: 'zh_female_qingxin' }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 502);
+    assert.equal((await res.json()).error.code, 'upstream_empty_audio');
+    assert.equal(mock.calls.volcTts, 2, 'no_audio is upstream-side and IS retried');
+  } finally {
+    mock.restore();
+  }
+
+  // 畸形响应（代理拦截页等）：500 而非 400
+  mock = installMockFetch({
+    volcSynth: () => new Response('<html>blocked</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+  });
+  try {
+    const res = await worker.fetch(
+      speechRequest({ model: 'volc-tts', input: 'x', voice: 'zh_female_qingxin' }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 500);
+    assert.equal((await res.json()).error.code, 'tts_generation_error');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('langdetect failures are server-side (500), not 400; retried once', async () => {
+  // 匿名通道常见 403/429：请求体只有文本，调用方无可改项 —— 必须归因为 5xx
+  let mock = installMockFetch({});
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/web/langdetect')) {
+      mock.calls.volcDetect++;
+      return new Response('forbidden', { status: 403 });
+    }
+    return origFetch(input, init);
+  };
+  try {
+    const res = await worker.fetch(
+      speechRequest({ model: 'volc-tts', input: 'x', voice: 'zh_female_qingxin' }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 500);
+    assert.equal((await res.json()).error.code, 'tts_generation_error');
+    assert.equal(mock.calls.volcDetect, 2, 'langdetect retried once');
+    assert.equal(mock.calls.volcTts, 0, 'TTS never reached without a language');
+  } finally {
+    globalThis.fetch = origFetch;
+    mock.restore();
+  }
+});

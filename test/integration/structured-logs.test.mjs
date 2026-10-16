@@ -249,11 +249,10 @@ test('every line is valid JSON on a single line, so a log pipeline can parse it'
   }
 });
 
-test('an unauthenticated request is rejected before any logging context exists', async () => {
-  // Auth runs before the log context is created, on purpose: an unauthenticated caller
-  // should not be able to make the worker emit request-shaped telemetry at all (it would
-  // be a free amplification channel into the log pipeline). The 401 is still visible —
-  // errorResponse's own path — but not as an `ev:"req"` line.
+test('a 401 emits a compact auth line, never a request-shaped telemetry line', async () => {
+  // Auth 在 logCtx 创建之前运行，这是刻意的：未认证调用方不应能产出 ev:"req" 形态的
+  // 遥测（免费的放大通道）。但 401 完全不可观测会让暴力探测隐形 —— 所以补一行独立的
+  // ev:"auth" 紧凑 warn（不含 route/voice 等维度），可按 level 过滤聚合。
   __test__.resetTokenCache();
   const mock = installMockFetch();
   try {
@@ -261,6 +260,10 @@ test('an unauthenticated request is rejected before any logging context exists',
     await res.arrayBuffer();
     assert.equal(res.status, 401);
     assert.equal(reqLines(mock).length, 0, 'a 401 must not emit a request telemetry line');
+    assert.ok(
+      mock.logs.some((l) => l.level === 'warn' && l.msg.includes('"ev":"auth"') && l.msg.includes('"status":401')),
+      'the 401 is still visible as a compact ev:auth warn line'
+    );
   } finally {
     mock.restore();
   }

@@ -60,10 +60,11 @@ test('upstream status is not echoed with its body in the error message', async (
   });
 });
 
-test('an unexpected internal throw yields a generic 500, not the raw message', async () => {
+test('upstream throw on /v1/models/public yields the fallback list, never the raw error', async () => {
+  // 旧行为（曾经）：这里回 500 fetch_error。统一兜底后改为 200 + 最小列表（火山静态表
+  // 不依赖上游，始终可用），内部错误原文只进日志 —— 泄漏防护断言保留。
   await withMock({}, async () => {
-    // Break the voice-list fetch with a message that looks like an internal leak, and
-    // hit an endpoint whose handler has no fallback of its own.
+    // Break the voice-list fetch with a message that looks like an internal leak.
     const real = globalThis.fetch;
     globalThis.fetch = async (input, init) => {
       const url = typeof input === 'string' ? input : input.url;
@@ -72,10 +73,12 @@ test('an unexpected internal throw yields a generic 500, not the raw message', a
     };
     try {
       const res = await worker.fetch(req('/v1/models/public'), ANON, {});
-      assert.equal(res.status, 500);
+      assert.equal(res.status, 200);
       const raw = await res.text();
       assert.ok(!raw.includes('/srv/secret'), 'internal path not leaked: ' + raw);
-      assert.equal(JSON.parse(raw).error.code, 'fetch_error');
+      const models = JSON.parse(raw);
+      assert.ok(Array.isArray(models) && models.length > 0, 'fallback list is served');
+      assert.ok(models.some((m) => m.owned_by === 'volcengine'), 'volc static voices survive the outage');
     } finally {
       globalThis.fetch = real;
     }
