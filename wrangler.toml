@@ -4,6 +4,10 @@ name = "edgetts-proxy"
 main = "dist/worker.js"
 compatibility_date = "2024-12-13"
 
+routes = [
+  { pattern = "edgetts.tymee.site", custom_domain = true }
+]
+
 # API_KEY is a secret and must NOT live in this file.
 #   wrangler secret put API_KEY
 # Without it the Worker returns 503 rather than silently serving unauthenticated
