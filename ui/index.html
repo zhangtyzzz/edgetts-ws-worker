@@ -1888,7 +1888,12 @@
             await new Promise((r) => sb.addEventListener('updateend', r, { once: true }));
           };
 
+          // 计时循环必须有 running 闸门：正常完成/用户点停止/出错都要停下，
+          // 否则 elapsed 会永远跳下去（统计面板常驻，用户会一直看到"总时间"增长）。
+          // 其余两条流式路径（PCM/容器收集）都有同样的闸门，这里对齐。
+          let running = true;
           function updateLoop() {
+            if (!running) return;
             self.streamStats.elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
             requestAnimationFrame(updateLoop);
           }
@@ -1915,9 +1920,12 @@
             while (true) {
               const { done, value } = await reader.read();
               if (done) {
-                self.streamReader = null;
+                self.streamReader = null;   // 用完即清，见 stopAllPlayback
                 break;
               }
+              // 用户点「停止」时 stopAllPlayback 会 cancel() reader，
+              // read() 以 {done:true} 收尾 —— 这不是"完成"，别报成功也别给下载。
+              if (!self.isPlaying) break;
               if (self.streamStats.ttfb === 0) {
                 self.streamStats.ttfb = Date.now() - startTime;
               }
@@ -1933,16 +1941,23 @@
               }
               self.updateStatus('接收中 ' + (self.streamStats.size / 1024).toFixed(0) + 'KB...', 'info');
             }
+            running = false;
+            self.streamStats.elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+            if (!self.isPlaying) {
+              self.updateStatus('⏹ 已停止（收到 ' + (self.streamStats.size / 1024).toFixed(0) + 'KB）', 'info');
+              return;
+            }
             if (self.streamStats.size === 0) {
               throw new Error('服务器返回了 0 字节音频，通常是请求在边缘被中断，请缩短文本后重试。');
             }
-            ms.endOfStream();
+            try { ms.endOfStream(); } catch (e) { /* 已关闭则忽略 */ }
             const blob = new Blob(chunks, { type: 'audio/mpeg' });
             self.downloadUrl = URL.createObjectURL(blob);
             self.downloadExt = 'mp3';
             self.showDownloadBtn = true;
             self.updateStatus('✅ MP3 流式完成！首字节 ' + (self.streamStats.ttfb / 1000).toFixed(3) + 's，开始播放 ' + (self.streamStats.playStart / 1000).toFixed(3) + 's', 'success');
           } catch (error) {
+            running = false;
             self.updateStatus('❌ ' + error.message, 'error');
             throw error;
           }
