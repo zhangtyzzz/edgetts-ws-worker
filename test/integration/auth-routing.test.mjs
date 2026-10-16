@@ -228,8 +228,9 @@ test('GET /v1/models/public needs no auth (checked before the auth gate)', async
     assert.equal(res.headers.get('Content-Type'), 'application/json');
     assert.equal(res.headers.get('Access-Control-Allow-Origin'), '*');
     const models = await res.json();
-    assert.equal(models.length, VOICES.length);
-    assert.equal(models.length, 322);
+    // VOICES(322 edge fixture) + 10 个火山音色静态并入
+    assert.equal(models.length, VOICES.length + Object.keys(__test__.VOLC_VOICES).length);
+    assert.equal(models.length, 332);
     assert.equal(mock.calls.voices, 1);
     const first = models[0];
     assert.equal(first.id, VOICES[0].ShortName);
@@ -246,7 +247,7 @@ test('GET /v1/models/public is also reachable while API_KEY is set and no Bearer
   await withMock({}, async (mock) => {
     const res = await worker.fetch(req('/v1/models/public'), { API_KEY: 's3cret-key' }, {});
     assert.equal(res.status, 200);
-    assert.equal((await res.json()).length, 322);
+    assert.equal((await res.json()).length, 332);
     assert.equal(mock.calls.voices, 1);
   });
 });
@@ -258,7 +259,7 @@ test('GET /v1/models returns the mapped voice list (anonymous mode)', async () =
     assert.equal(res.headers.get('Content-Type'), 'application/json');
     assert.equal(res.headers.get('Access-Control-Allow-Origin'), '*');
     const models = await res.json();
-    assert.equal(models.length, 322);
+    assert.equal(models.length, 332);
     assert.equal(mock.calls.voices, 1);
     assert.ok(models.some((m) => m.id === 'zh-CN-XiaoxiaoNeural'));
   });
@@ -273,7 +274,7 @@ test('GET /v1/models with a valid Bearer returns the list; without one it is 401
       {}
     );
     assert.equal(ok.status, 200);
-    assert.equal((await ok.json()).length, 322);
+    assert.equal((await ok.json()).length, 332);
     assert.equal(mock.calls.voices, 1);
 
     // /v1/models sits *after* the auth gate (unlike /v1/models/public).
@@ -317,7 +318,9 @@ test('GET /v1/models?neural / ?multilingual filter by id substring', async () =>
     const env = { ALLOW_ANONYMOUS: 'true' };
     const ids = async (path) => (await (await worker.fetch(req(path), env, {})).json()).map((m) => m.id);
 
-    assert.deepEqual(await ids('/v1/models'), voices.map((v) => v.ShortName));
+    // 完整列表 = edge 音色 + 火山音色（owned_by=volcengine，静态表并入 /v1/models）
+    const allIds = voices.map((v) => v.ShortName).concat(Object.keys(__test__.VOLC_VOICES));
+    assert.deepEqual(await ids('/v1/models'), allIds);
     assert.deepEqual(await ids('/v1/models?neural=true'), [
       'zh-CN-XiaoxiaoNeural',
       'en-US-AvaMultilingualNeural',
@@ -331,8 +334,8 @@ test('GET /v1/models?neural / ?multilingual filter by id substring', async () =>
       'en-US-AvaMultilingualNeural',
     ]);
     // Anything other than "true"/"1" is not a filter.
-    assert.deepEqual(await ids('/v1/models?neural=false'), voices.map((v) => v.ShortName));
-    assert.deepEqual(await ids('/v1/models?neural='), voices.map((v) => v.ShortName));
+    assert.deepEqual(await ids('/v1/models?neural=false'), allIds);
+    assert.deepEqual(await ids('/v1/models?neural='), allIds);
     // The voice list is cached in-process, so those 7 requests share ONE upstream
     // fetch. Filtering happens on the cached list, per request.
     assert.equal(mock.calls.voices, 1, '7 requests share a single cached upstream fetch');

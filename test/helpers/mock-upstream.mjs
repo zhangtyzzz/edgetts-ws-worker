@@ -47,11 +47,15 @@ export function installMockFetch(opts = {}) {
     failSynthOnce,
     voices = VOICES,
     region = 'testus',
+    volcSynth,
+    failVolcOnce,
+    volcLang = 'zh',
   } = opts;
 
-  const calls = { token: 0, synth: 0, voices: 0, synthOrder: [], synthSsml: [] };
+  const calls = { token: 0, synth: 0, voices: 0, synthOrder: [], synthSsml: [], volcDetect: 0, volcTts: 0, volcBodies: [] };
   let tokenFailsLeft = failTokenTimes;
   let synthFailPending = failSynthOnce ? { ...failSynthOnce } : null;
+  let volcFailPending = failVolcOnce ? { ...failVolcOnce } : null;
   const original = globalThis.fetch;
 
   // The Worker logs progress via console.*. Under `node --test`, results are multiplexed
@@ -67,6 +71,36 @@ export function installMockFetch(opts = {}) {
 
   globalThis.fetch = async (input, init = {}) => {
     const url = typeof input === 'string' ? input : input.url;
+
+    // 4. 火山翻译：语言检测
+    if (url.includes('translate.volcengine.com/web/langdetect')) {
+      calls.volcDetect++;
+      return new Response(
+        JSON.stringify({ language: volcLang, base_resp: { status_code: 0, status_message: '' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 5. 火山翻译：合成（返回 base64 音频的业务 JSON）
+    if (url.includes('translate.volcengine.com/crx/tts')) {
+      calls.volcTts++;
+      const body = JSON.parse(init.body || '{}');
+      calls.volcBodies.push(body);
+      if (volcFailPending) {
+        const { status } = volcFailPending;
+        volcFailPending = null;
+        return new Response('volc transient', { status });
+      }
+      if (typeof volcSynth === 'function') {
+        return volcSynth({ url, init, body });
+      }
+      // Default: 100ms 的假音频（与 edge mock 同一确定性字节数）
+      const b64 = Buffer.from(fakeAudio(100)).toString('base64');
+      return new Response(
+        JSON.stringify({ audio: { data: b64, duration: 0 }, base_resp: { status_code: 0, status_message: '' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     // 1. Token endpoint
     if (url.includes('dev.microsofttranslator.com/apps/endpoint')) {

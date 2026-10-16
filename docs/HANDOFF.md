@@ -23,8 +23,8 @@
 
 | 路径 | 行数 | 说明 |
 |---|---|---|
-| `src/worker.js` | 1708 | **生产 Worker**。单文件，含路由/鉴权/分块/合成/容器合并/日志 |
-| `ui/index.html` | 2463 | **内嵌 Vue SPA**。构建时注入进 Worker（`UI_HTML`） |
+| `src/worker.js` | 1941 | **生产 Worker**。单文件，含路由/鉴权/分块/合成/容器合并/日志 |
+| `ui/index.html` | 2458 | **内嵌 Vue SPA**。构建时注入进 Worker（`UI_HTML`） |
 | `scripts/build.mjs` | 64 | `ui/` + `src/` → `dist/worker.js`。含两个守卫（见 §6） |
 | `legacy/worker-ndjson.js` | 166 | **不是死代码**：逐词时间戳（WordBoundary）的唯一来源，见 §5 |
 | `test/{unit,integration,regression,e2e}/` | 23 个文件 / 9283 行 | 测试:源码 ≈ 2.2:1 |
@@ -266,7 +266,7 @@ npx wrangler tail edgetts-proxy --format=json
 
 ### TODO-2：前端拆分（**最不建议**）
 
-- **是什么**：`ui/index.html` 已 2463 行，含 322 个音色的语言映射表。可把数据表抽出去。
+- **是什么**：`ui/index.html` 已 2363 行，含 322 个音色的语言映射表。可把数据表抽出去。
 - **为什么现在不做**：
   1. 用户零可见收益
   2. 它刚经过系统审计（7 个方向，1 真缺陷已修），有 21 项 browser e2e 守着
