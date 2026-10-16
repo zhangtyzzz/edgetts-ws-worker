@@ -1120,8 +1120,11 @@
       methods: {
         async loadVoices() {
           try {
-            // 使用公开的语音列表端点（不需要认证）
-            const response = await fetch('/v1/models/public');
+            // 使用公开的语音列表端点（不需要认证）。
+            // cache:'no-cache' = 每次带 If-None-Match 条件请求：ETag 命中时 304 几乎零成本，
+            // 服务端数据变更（如新增引擎音色）时立刻拿到新列表。否则接口的 max-age=21600
+            // 会让浏览器在 6 小时内连请求都不发，部署新音色后老用户会一直看到旧列表。
+            const response = await fetch('/v1/models/public', { cache: 'no-cache' });
             if (!response.ok) throw new Error('Failed to load voices');
             
             const voices = await response.json();
