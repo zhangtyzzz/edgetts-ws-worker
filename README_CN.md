@@ -100,7 +100,8 @@ npx wrangler deploy
   "voice": "zh-CN-XiaoxiaoNeural", // Edge：ShortName 或 OpenAI 别名；火山：如 zh_female_sichuan
   "speed": 1.0,                     // 0.25–4.0（仅 Edge）
   "pitch": 1.0,                     // 0.5–1.5（仅 Edge）
-  "style": "general",              // 表达风格（仅 Edge）
+  "style": "general",              // 情绪风格（仅 Edge）：cheerful/sad/angry/excited/whisper 等
+  "style_degree": 1.0,             // 情绪强度 0.05–2.0（仅 Edge，style 非 general 时有意义）
   "response_format": "mp3",        // Edge: mp3|opus|wav；火山: 仅 mp3
   "stream": false,                  // true → 裸音频流
   "cleaning_options": { }           // 合成前清理 markdown/emoji/url 等
@@ -155,10 +156,24 @@ curl -X POST "$BASE/v1/audio/speech" -H "Authorization: Bearer $KEY" \
 火山引擎的能力边界（由上游接口决定）：
 
 - 仅支持 `response_format: "mp3"`，其他格式返回 400 `invalid_response_format`
-- 不支持 `speed` / `pitch` / `style` 与 `<break>` 停顿标签（停顿标签会被替换为逗号），
-  这些参数传了会被忽略
+- 不支持 `speed` / `pitch` / `style` / `style_degree` 与 `<break>` 停顿标签（停顿标签会被
+  替换为逗号），这些参数传了会被忽略；**情绪控制是 Edge 引擎专属能力**（火山这个匿名
+  通道的上游协议没有情绪参数，音色表的 `emotions` 字段全为空）
 - `stream: true` 有效，且是 **MP3 分块渐进下发**（见[流式](#流式)）
 - 长文本同样分块并发合成；上游业务错误（如音色不存在）映射为 400 并透出火山错误码
+
+#### 情绪风格（Edge）
+
+`style` 直接进上游 SSML 的 `mstts:express-as`。常用值：`cheerful` 开心、`sad` 悲伤、
+`angry` 生气、`excited` 兴奋、`affectionate` 亲昵、`gentle` 温柔、`calm` 平静、
+`serious` 严肃、`hopeful` 期待、`surprised` 惊讶、`fearful` 恐惧、`whisper` 耳语等。
+
+`style_degree`（0.05–2.0，缺省 1）控制情绪强度，仅在 `style` 非 `general` 时有意义；
+越界返回 400 `invalid_style_degree`。两点注意：
+
+- **是否生效取决于音色**：Multilingual 系列与主力中文音色（晓晓/云希/云健等）覆盖最全；
+  不支持的音色上游**静默按中性处理、不报错**——听不出差别就换带 Multilingual 的音色。
+- 合法性校验对所有引擎一致（火山传非法 `style_degree` 同样 400），合法值传给火山则被忽略。
 
 <a name="流式"></a>
 #### 流式

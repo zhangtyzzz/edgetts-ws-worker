@@ -171,6 +171,18 @@ test('getSsml emits exactly one voice/express-as/prosody nesting with the given 
   assert.equal(prosodyBody(ssml), 'hi');
 });
 
+test('getSsml styledegree: omitted at default 1, emitted only when it differs', () => {
+  // 缺省与显式 1 都不发属性 —— 与上游"缺省 = 1"的处理一致，少一个属性少一分解析差异
+  assert.ok(!getSsml('hi', 'v', '0', '0', 'cheerful').includes('styledegree'), 'omitted -> no attr');
+  assert.ok(!getSsml('hi', 'v', '0', '0', 'cheerful', 1).includes('styledegree'), 'explicit 1 -> no attr');
+  const half = getSsml('hi', 'v', '0', '0', 'cheerful', 0.5);
+  assert.ok(half.includes('styledegree="0.5"'), '0.5 rendered');
+  const boosted = getSsml('hi', 'v', '0', '0', 'sad', 2);
+  assert.ok(boosted.includes('<mstts:express-as style="sad" styledegree="2">'), '2 rendered inline');
+  // 浮点尾巴不进 SSML：0.30000000000000004 -> 0.3
+  assert.ok(getSsml('hi', 'v', '0', '0', 'cheerful', 0.1 + 0.2).includes('styledegree="0.3"'));
+});
+
 test('getSsml escapes &, < and > in the text body without double-escaping', () => {
   assert.equal(prosodyBody(getSsml('a & b', 'v', '0', '0', 'general')), 'a &amp; b');
   assert.equal(prosodyBody(getSsml('1 < 2 > 0', 'v', '0', '0', 'general')), '1 &lt; 2 &gt; 0');

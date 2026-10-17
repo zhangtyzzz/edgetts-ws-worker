@@ -24,6 +24,8 @@ var LIMITS = {
   MAX_SPEED: 4,
   MIN_PITCH: 0.5,
   MAX_PITCH: 1.5,
+  MIN_STYLE_DEGREE: 0.05,
+  MAX_STYLE_DEGREE: 2,
   MIN_CONCURRENCY: 1,
   MAX_CONCURRENCY: 20,
   MIN_CHUNK_SIZE: 50,
@@ -484,6 +486,21 @@ async function handleSpeechRequest(request, logCtx = null) {
 
   const rate = ((speedNum - 1) * 100).toFixed(0);
   const finalPitch = ((pitchNum - 1) * 100).toFixed(0);
+  // 情绪强度（styledegree）：仅 style 非 general 时有意义，但校验放在主路径共享段 ——
+  // 无论走哪个引擎，非法值都应该得到一致的 400，而不是火山静默忽略、edge 报错。
+  // 合法但传给火山时会被忽略（上游协议无此参数）。
+  const styleDegreeRaw = requestBody.style_degree;
+  let styleDegreeNum = 1;
+  if (styleDegreeRaw !== undefined) {
+    styleDegreeNum = Number(styleDegreeRaw);
+    if (!Number.isFinite(styleDegreeNum) || styleDegreeNum < LIMITS.MIN_STYLE_DEGREE || styleDegreeNum > LIMITS.MAX_STYLE_DEGREE) {
+      return errorResponse(
+        `style_degree 超出范围：${JSON.stringify(styleDegreeRaw)}，允许 ${LIMITS.MIN_STYLE_DEGREE}–${LIMITS.MAX_STYLE_DEGREE}`,
+        400,
+        "invalid_style_degree"
+      );
+    }
+  }
   // 这里有两种**刻意不同**的策略，模块审计时发现代码里没写明理由，补记：
   //
   //   speed / pitch      -> 越界即 400 拒绝（见上面 invalid_speed / invalid_pitch）
@@ -624,7 +641,10 @@ async function handleSpeechRequest(request, logCtx = null) {
   }
   // ttsArgs 是位置参数、且调用点用 `...ttsArgs, label` 追加 label，所以**不能**往这个
   // 数组里塞新元素 —— 那会把 label 挤到后面一位。logCtx 作为独立参数单独传。
-  const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
+  const ttsArgs = [finalVoice, rate, finalPitch, style, styleDegreeNum, outputFormat, contentType];
+  // contentType 由调用点显式传参（getVoice/streamVoice 的响应头用它）。历史上这里靠
+  // ttsArgs[5] 位置魔法反取 —— styleDegree 插进中间时索引立刻错位（真实翻过车），
+  // 参数化之后禁止再用位置索引读取。
   if (logCtx) logCtx.engine = "edge";
   if (stream) {
     return await streamVoice(
@@ -635,7 +655,7 @@ async function handleSpeechRequest(request, logCtx = null) {
       logCtx
     );
   } else {
-    return await getVoice(textChunks, safeConcurrency, logCtx, ...ttsArgs);
+    return await getVoice(textChunks, safeConcurrency, contentType, logCtx, ...ttsArgs);
   }
 }
 
@@ -1268,8 +1288,7 @@ async function synthesizeAllChunks(textChunks, concurrency, fetchChunk, logCtx) 
   return out;
 }
 
-async function getVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
-  const contentType = ttsArgs[5] || "audio/mpeg";
+async function getVoice(textChunks, concurrency, contentType, logCtx, ...ttsArgs) {
   try {
     const allAudioBlobs = await synthesizeAllChunks(textChunks, concurrency, (t, label) => getAudioChunk(t, ...ttsArgs, label, logCtx), logCtx);
     // WAV 是带头部的容器：裸拼接 N 个分块等于把 N 个完整 RIFF 文件首尾相接，
@@ -1512,14 +1531,14 @@ async function getVolcAudioChunk(text, speaker, language, label = "", logCtx = n
 }
 var MAX_CHUNK_ATTEMPTS = 3;
 
-async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, contentType, label = "", logCtx = null) {
+async function getAudioChunk(text, voiceName, rate, pitch, style, styleDegree, outputFormat, contentType, label = "", logCtx = null) {
   let lastError;
   for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
     try {
       // A 401 means the cached token expired mid-request; force a refresh before retrying.
       const endpoint = await getEndpoint({ forceRefresh: attempt > 1 && lastError?.status === 401 });
       const url = `https://${endpoint.r}.tts.speech.microsoft.com/cognitiveservices/v1`;
-      const ssml = getSsml(text, voiceName, rate, pitch, style);
+      const ssml = getSsml(text, voiceName, rate, pitch, style, styleDegree);
       // 计在 fetch 之前：这一次尝试无论成败都消耗了一个 subrequest 配额（上限 50/次调用），
       // 所以「实际发出多少」才是要观测的量，不是「成功多少」。
       if (logCtx) logCtx.upstreamCalls++;
@@ -1684,7 +1703,7 @@ function escapeXmlAttr(value) {
     .replace(/'/g, "&apos;");
 }
 
-function getSsml(text, voiceName, rate, pitch, style) {
+function getSsml(text, voiceName, rate, pitch, style, styleDegreeNum = 1) {
   // <break> is the one tag callers may legitimately embed, so it is preserved verbatim
   // while everything else in the text is escaped. The placeholder includes a random
   // token so text that literally contains the placeholder string cannot forge a tag.
@@ -1714,9 +1733,13 @@ function getSsml(text, voiceName, rate, pitch, style) {
   });
   // voiceName/style are already whitelist-validated in handleSpeechRequest; escaping here
   // keeps getSsml safe on its own so a future caller can't reintroduce SSML injection.
+  // styledegree 只在非默认强度时输出（上游对缺省 = 1 的处理一致，少一个属性少一分
+  // 上游解析差异的风险）；toFixed(2) 避免 0.30000000000000004 这类浮点尾巴进 SSML。
+  const degreeAttr =
+    styleDegreeNum !== 1 ? ` styledegree="${Number(styleDegreeNum.toFixed(2))}"` : "";
   return `<speak xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="http://www.w3.org/2001/mstts" version="1.0" xml:lang="en-US">
     <voice name="${escapeXmlAttr(voiceName)}">
-      <mstts:express-as style="${escapeXmlAttr(style)}">
+      <mstts:express-as style="${escapeXmlAttr(style)}"${degreeAttr}>
         <prosody rate="${escapeXmlAttr(rate)}%" pitch="${escapeXmlAttr(pitch)}%">${finalText}</prosody>
       </mstts:express-as>
     </voice>
@@ -1918,6 +1941,7 @@ var ERROR_PARAM = {
   invalid_voice: "voice",
   invalid_speed: "speed",
   invalid_pitch: "pitch",
+  invalid_style_degree: "style_degree",
   invalid_style: "style",
   invalid_response_format: "response_format",
   invalid_stream: "stream",
