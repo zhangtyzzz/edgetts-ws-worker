@@ -115,7 +115,8 @@ No dependencies to install — the build and tests use only Node's built-ins.
   "voice": "en-US-AvaNeural",       // Edge: ShortName or an OpenAI alias; Volcano: e.g. zh_female_sichuan
   "speed": 1.0,                      // 0.25–4.0 (Edge only)
   "pitch": 1.0,                      // 0.5–1.5 (Edge only)
-  "style": "general",               // expression style (Edge only)
+  "style": "general",               // emotion style (Edge only): cheerful/sad/angry/excited/whisper…
+  "style_degree": 1.0,               // emotion intensity 0.05–2.0 (Edge only; meaningful when style ≠ general)
   "response_format": "mp3",         // Edge: mp3 | opus | wav; Volcano: mp3 only
   "stream": false,                   // true → raw audio stream
   "cleaning_options": { }            // strip markdown/emoji/urls/etc. before synthesis
@@ -173,11 +174,29 @@ The Volcano voices (the 10 entries with `owned_by: "volcengine"` in `GET /v1/mod
 Volcano engine limits (imposed by the upstream endpoint):
 
 - `response_format` must be `mp3`; anything else returns 400 `invalid_response_format`
-- `speed` / `pitch` / `style` and `<break>` pause tags are not supported (pause tags are
-  replaced with a comma); these parameters are accepted and ignored
+- `speed` / `pitch` / `style` / `style_degree` and `<break>` pause tags are not supported
+  (pause tags are replaced with a comma); these parameters are accepted and ignored.
+  **Emotion control is an Edge-only capability** — the Volcano anonymous channel's upstream
+  protocol has no emotion parameter, and every voice in its list carries an empty `emotions` field
 - `stream: true` works and streams **MP3 chunks progressively** (see [Streaming](#streaming))
 - Long text is chunked and synthesized concurrently, same as Edge; upstream business errors
   (e.g. unknown voice) map to a 400 carrying the Volcano error code
+
+#### Emotion styles (Edge)
+
+`style` goes straight into the upstream SSML `mstts:express-as` element. Common values:
+`cheerful`, `sad`, `angry`, `excited`, `affectionate`, `gentle`, `calm`, `serious`,
+`hopeful`, `surprised`, `fearful`, `whisper`, …
+
+`style_degree` (0.05–2.0, default 1) scales the emotion intensity; it only matters when
+`style` ≠ `general`, and out-of-range values return 400 `invalid_style_degree`. Two caveats:
+
+- **Effectiveness depends on the voice**: the Multilingual family and the flagship Chinese
+  voices (Xiaoxiao/Yunxi/Yunjian…) have the broadest style coverage; voices without style
+  support are **silently synthesized as neutral — no error is raised**. If you can't hear a
+  difference, switch to a Multilingual voice.
+- Validation is engine-agnostic (an invalid `style_degree` is a 400 even on Volcano);
+  valid values sent to Volcano are ignored.
 
 <a name="streaming"></a>
 #### Streaming
